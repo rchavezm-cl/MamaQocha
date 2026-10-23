@@ -1111,6 +1111,246 @@ def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) 
         return pd.read_sql(query, conn, params=params)
 
 
+def load_recetas(solo_activas: bool = True) -> pd.DataFrame:
+    """Carga todas las recetas con sus ingredientes y gramajes."""
+    filtro = "WHERE r.activo = TRUE" if solo_activas else ""
+    query = text(
+        f"""
+        SELECT
+            r.id_receta,
+            r.nombre AS receta,
+            r.categoria,
+            r.tiempo_preparacion_min,
+            r.precio_venta,
+            r.activo,
+            p.id_producto,
+            p.nombre AS ingrediente,
+            p.unidad_medida,
+            ri.cantidad_kg
+        FROM recetas AS r
+        JOIN receta_ingredientes AS ri ON ri.id_receta = r.id_receta
+        JOIN productos AS p ON p.id_producto = ri.id_producto
+        {filtro}
+        ORDER BY r.categoria, r.nombre, p.nombre
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
+
+
+def load_recetas_catalogo(solo_activas: bool = True) -> pd.DataFrame:
+    """Carga el catálogo agrupado de recetas con su ficha de escandallo resumida."""
+    df_raw = load_recetas(solo_activas=solo_activas)
+    if df_raw.empty:
+        return pd.DataFrame()
+
+    def agrupar_ingredientes(grupo):
+        ings = [f"{row['ingrediente']} ({row['cantidad_kg']:.3f} {row['unidad_medida']})" for _, row in grupo.iterrows()]
+        return ", ".join(ings)
+
+    resumen = df_raw.groupby(["id_receta", "receta", "categoria", "tiempo_preparacion_min", "precio_venta", "activo"]).apply(agrupar_ingredientes).reset_index(name="escandallo_ingredientes")
+    return resumen.sort_values(by=["categoria", "receta"])
+
+
+def consumir_produccion_recetas(
+    id_local: int,
+    orden_platos: Dict[int, int],
+    turno: str,
+    observaciones: Optional[str] = None,
+    id_usuario: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Descuenta de forma atómica los insumos requeridos para producir una comanda de platos,
+    aplicando el algoritmo FEFO estricto por lote y calculando márgenes financieros.
+    """
+    # Filtrar solo recetas con cantidad > 0
+    orden_filtrada = {int(k): int(v) for k, v in orden_platos.items() if int(v) > 0}
+    if not orden_filtrada:
+        raise ValueError("Debes especificar la cantidad de al menos un plato a preparar.")
+
+    df_recetas = load_recetas(solo_activas=False)
+
+    # 1. Calcular insumos requeridos consolidados
+    # requerimientos: { id_producto: { "nombre": str, "unidad": str, "total_kg": float } }
+    requerimientos: Dict[int, Dict[str, Any]] = {}
+    detalle_platos_producidos: list[Dict[str, Any]] = []
+    venta_total = 0.0
+
+    for id_rec, cant_platos in orden_filtrada.items():
+        filas_rec = df_recetas[df_recetas["id_receta"] == id_rec]
+        if filas_rec.empty:
+            continue
+        nom_receta = filas_rec.iloc[0]["receta"]
+        precio_vta = float(filas_rec.iloc[0]["precio_venta"])
+        subtotal_vta = precio_vta * cant_platos
+        venta_total += subtotal_vta
+
+        detalle_platos_producidos.append({
+            "id_receta": id_rec,
+            "receta": nom_receta,
+            "cantidad_platos": cant_platos,
+            "precio_venta": precio_vta,
+            "subtotal_venta": subtotal_vta,
+        })
+
+        for _, fila_ing in filas_rec.iterrows():
+            id_prod = int(fila_ing["id_producto"])
+            kg_necesarios = float(fila_ing["cantidad_kg"]) * cant_platos
+            if id_prod not in requerimientos:
+                requerimientos[id_prod] = {
+                    "nombre": fila_ing["ingrediente"],
+                    "unidad": fila_ing["unidad_medida"],
+                    "total_kg": 0.0,
+                }
+            requerimientos[id_prod]["total_kg"] += kg_necesarios
+
+    # 2. Transacción de validación, descuento FEFO y registro
+    with engine.begin() as conn:
+        # A. Validar stock disponible para todos los insumos involucrados
+        lotes_por_producto: Dict[int, list[Dict[str, Any]]] = {}
+
+        for id_prod, data_req in requerimientos.items():
+            req_kg = data_req["total_kg"]
+            q_lotes = text(
+                """
+                SELECT
+                    s.id_stock,
+                    s.id_lote,
+                    s.cantidad,
+                    l.codigo_lote_proveedor,
+                    l.fecha_vencimiento,
+                    COALESCE(dc.costo_unitario, 0) AS costo_unitario
+                FROM stock_lote_local AS s
+                JOIN lotes AS l ON l.id_lote = s.id_lote
+                JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+                WHERE s.id_local = :id_local AND dc.id_producto = :id_producto AND s.cantidad > 0
+                ORDER BY l.fecha_vencimiento ASC, l.fecha_recepcion ASC, l.id_lote ASC
+                FOR UPDATE OF s
+                """
+            )
+            rows = conn.execute(q_lotes, {"id_local": id_local, "id_producto": id_prod}).fetchall()
+            stock_total_disp = sum(float(r[2]) for r in rows)
+
+            if stock_total_disp < req_kg:
+                raise ValueError(
+                    f"Stock insuficiente de {data_req['nombre']}. "
+                    f"Requerido para la producción: {req_kg:.3f} {data_req['unidad']}, "
+                    f"disponible en este local: {stock_total_disp:.3f} {data_req['unidad']}."
+                )
+
+            lotes_por_producto[id_prod] = [
+                {
+                    "id_stock": r[0],
+                    "id_lote": r[1],
+                    "cantidad_disponible": float(r[2]),
+                    "codigo_lote_proveedor": r[3],
+                    "fecha_vencimiento": r[4],
+                    "costo_unitario": float(r[5]),
+                }
+                for r in rows
+            ]
+
+        # B. Registrar el movimiento maestro de cocina
+        resumen_platos_str = ", ".join(f"{item['cantidad_platos']} {item['receta']}" for item in detalle_platos_producidos)
+        ref_movimiento = f"PRODUCCIÓN {turno.upper()}: {resumen_platos_str}"[:100]
+
+        q_insert_mov = text(
+            """
+            INSERT INTO movimientos (
+                tipo_movimiento, id_local_origen, id_local_destino,
+                id_usuario, referencia, observaciones, estado
+            )
+            VALUES (
+                'salida_cocina', :id_local, NULL,
+                :id_usuario, :referencia, :observaciones, 'confirmado'
+            )
+            RETURNING id_movimiento;
+            """
+        )
+        id_movimiento = conn.execute(
+            q_insert_mov,
+            {
+                "id_local": id_local,
+                "id_usuario": id_usuario,
+                "referencia": ref_movimiento,
+                "observaciones": observaciones or f"Comanda elaborada en {turno}",
+            },
+        ).scalar_one()
+
+        # C. Descontar stock por FEFO y registrar detalle_movimiento
+        costo_total_insumos = 0.0
+        desglose_lotes_consumidos: list[Dict[str, Any]] = []
+
+        for id_prod, data_req in requerimientos.items():
+            kg_por_descontar = data_req["total_kg"]
+            lista_lotes = lotes_por_producto[id_prod]
+
+            for lote_info in lista_lotes:
+                if kg_por_descontar <= 0:
+                    break
+
+                cant_a_descontar = min(lote_info["cantidad_disponible"], kg_por_descontar)
+                nuevo_stock_lote = lote_info["cantidad_disponible"] - cant_a_descontar
+                costo_consumo = cant_a_descontar * lote_info["costo_unitario"]
+                costo_total_insumos += costo_consumo
+
+                # Actualizar stock
+                conn.execute(
+                    text(
+                        """
+                        UPDATE stock_lote_local
+                        SET cantidad = :nuevo_stock, actualizado_en = CURRENT_TIMESTAMP
+                        WHERE id_stock = :id_stock
+                        """
+                    ),
+                    {"nuevo_stock": nuevo_stock_lote, "id_stock": lote_info["id_stock"]},
+                )
+
+                # Insertar detalle_movimiento
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
+                        VALUES (:id_movimiento, :id_lote, :cantidad, :obs)
+                        """
+                    ),
+                    {
+                        "id_movimiento": id_movimiento,
+                        "id_lote": lote_info["id_lote"],
+                        "cantidad": cant_a_descontar,
+                        "obs": f"Producción {data_req['nombre']} ({turno})",
+                    },
+                )
+
+                desglose_lotes_consumidos.append({
+                    "id_lote": lote_info["id_lote"],
+                    "producto": data_req["nombre"],
+                    "codigo_lote_proveedor": lote_info["codigo_lote_proveedor"],
+                    "cantidad_consumida": cant_a_descontar,
+                    "unidad": data_req["unidad"],
+                    "costo_unitario": lote_info["costo_unitario"],
+                    "costo_total": costo_consumo,
+                    "nuevo_stock": nuevo_stock_lote,
+                })
+
+                kg_por_descontar -= cant_a_descontar
+
+        margen_bruto = venta_total - costo_total_insumos
+        pct_margen = (margen_bruto / venta_total * 100) if venta_total > 0 else 0.0
+
+        return {
+            "id_movimiento": id_movimiento,
+            "turno": turno,
+            "platos_totales": sum(item["cantidad_platos"] for item in detalle_platos_producidos),
+            "detalle_platos": detalle_platos_producidos,
+            "desglose_insumos": desglose_lotes_consumidos,
+            "costo_total_insumos": costo_total_insumos,
+            "venta_total": venta_total,
+            "margen_bruto": margen_bruto,
+            "pct_margen": pct_margen,
+        }
+
+
 def test_connection():
     """Función de prueba de solo lectura para verificar la base de datos."""
     try:

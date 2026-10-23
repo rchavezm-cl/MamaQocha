@@ -355,9 +355,181 @@ with tab_alertas:
 
     inventario_df = db.load_inventario_alertas(id_local=id_local_activo)
 
+    # --------------------------------------------------------------------------
+    # NUEVA FILA: KPIS DE GESTIÓN Y CONTROL EJECUTIVO
+    # --------------------------------------------------------------------------
+    total_val_inv = float(inventario_df["valor_inventario"].sum()) if not inventario_df.empty else 0.0
+    potencial_facturacion = total_val_inv * 3.2
+    lotes_haccp_ok = len(inventario_df[inventario_df["temperatura_recepcion"] <= 4.0]) if not inventario_df.empty else 0
+    total_lotes_inv = len(inventario_df) if not inventario_df.empty else 1
+    pct_haccp = (lotes_haccp_ok / total_lotes_inv * 100)
+    dias_vida_pond = (
+        float((inventario_df["dias_para_vencer"] * inventario_df["valor_inventario"]).sum() / total_val_inv)
+        if total_val_inv > 0
+        else 0.0
+    )
+    total_kg_stock = float(inventario_df["cantidad"].sum()) if not inventario_df.empty else 0.0
+    porciones_totales_estimadas = int(total_kg_stock / 0.220) if total_kg_stock > 0 else 0
+
+    col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
+    with col_ex1:
+        st.metric(
+            "💵 Potencial Facturación Carta",
+            f"${potencial_facturacion:,.0f} CLP",
+            "Factor 3.2× Costo (Gastro)",
+            help="Venta estimada si el 100% del stock se transforma en platos de la carta.",
+        )
+    with col_ex2:
+        st.metric(
+            "🛡️ Inocuidad HACCP (≤ 4°C)",
+            f"{pct_haccp:.1f}%",
+            f"{lotes_haccp_ok}/{total_lotes_inv} lotes seguros",
+            help="Porcentaje de partidas que ingresaron cumpliendo la cadena de frío reglamentaria.",
+        )
+    with col_ex3:
+        st.metric(
+            "⏳ Vida Útil Promedio Ponderada",
+            f"{dias_vida_pond:.1f} días",
+            "Ponderado por capital",
+            help="Días promedio de vida útil remanente ponderados por el valor en dinero de cada lote.",
+        )
+    with col_ex4:
+        st.metric(
+            "🍽️ Capacidad Total de Comandas",
+            f"{porciones_totales_estimadas:,} platos",
+            f"{total_kg_stock:.1f} kg activos",
+            help="Cantidad estimada de platos individuales elaborables con el stock de carnes y mariscos.",
+        )
+
     if inventario_df.empty:
         st.info("ℹ️ No hay existencias registradas para el local seleccionado.")
     else:
+        # --------------------------------------------------------------------------
+        # TOP PREPARACIONES SUGERIDAS (RESCATE DE MATERIA PRIMA CRÍTICA EN CARTA)
+        # --------------------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("#### 🍲 Top Preparaciones Recomendadas para la Carta del Día (Rescate de Insumos)")
+        st.caption(
+            "Cruce algorítmico entre materias primas en zona crítica y las fichas técnicas de Mamá Qocha. "
+            "Permite al chef y al administrador activar 'Sugerencias del Día' para monetizar el stock antes de que venza."
+        )
+
+        recetas_activas_df = db.load_recetas(solo_activas=True)
+        lotes_urgentes = inventario_df[(inventario_df["dias_para_vencer"] >= 0) & (inventario_df["dias_para_vencer"] <= 7)]
+
+        if lotes_urgentes.empty:
+            st.success("✅ **Excelente estado operativo:** No se detectan insumos en riesgo crítico (≤ 7 días). Todo el inventario se encuentra en rango preventivo u óptimo.")
+        elif recetas_activas_df.empty:
+            st.info("No hay recetas activas registradas en el catálogo maestro.")
+        else:
+            insumos_urg_resumen = (
+                lotes_urgentes.groupby(["id_producto", "producto"])
+                .agg(
+                    kg_urgentes=("cantidad", "sum"),
+                    min_dias=("dias_para_vencer", "min"),
+                    locales=("local", lambda x: ", ".join(sorted(x.unique()))),
+                    valor_riesgo=("valor_inventario", "sum"),
+                )
+                .reset_index()
+            )
+
+            platos_sugeridos = []
+            for _, ins_row in insumos_urg_resumen.iterrows():
+                id_prod = ins_row["id_producto"]
+                nom_prod = ins_row["producto"]
+                kg_disp = float(ins_row["kg_urgentes"])
+                min_d = int(ins_row["min_dias"])
+                locs_str = ins_row["locales"]
+                val_rsk = float(ins_row["valor_riesgo"])
+
+                recetas_asoc = recetas_activas_df[recetas_activas_df["id_producto"] == id_prod]
+                for _, rec_row in recetas_asoc.iterrows():
+                    kg_por_plato = float(rec_row["cantidad_kg"])
+                    if kg_por_plato > 0:
+                        platos_posibles = int(kg_disp / kg_por_plato)
+                        if platos_posibles > 0:
+                            precio_vta = float(rec_row["precio_venta"])
+                            venta_recup = platos_posibles * precio_vta
+                            platos_sugeridos.append({
+                                "receta": rec_row["receta"],
+                                "categoria": rec_row["categoria"],
+                                "insumo_critico": nom_prod,
+                                "kg_en_riesgo": kg_disp,
+                                "porciones": platos_posibles,
+                                "precio_carta": precio_vta,
+                                "venta_recuperable": venta_recup,
+                                "dias_restantes": min_d,
+                                "locales": locs_str,
+                                "costo_riesgo": val_rsk,
+                            })
+
+            df_sugeridos = pd.DataFrame(platos_sugeridos)
+            if df_sugeridos.empty:
+                st.warning("Hay materias primas críticas pero no están vinculadas a recetas activas.")
+            else:
+                df_sugeridos = df_sugeridos.sort_values(by=["dias_restantes", "venta_recuperable"], ascending=[True, False])
+                venta_total_rescatable = df_sugeridos["venta_recuperable"].sum()
+
+                st.markdown(
+                    f"""
+                    <div style="background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 100%); border: 1px solid #fde68a; border-left: 6px solid #f59e0b; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px;">
+                        <strong style="color: #92400e; font-size: 1.05rem;">🎯 Oportunidad Comercial: Plan de Choque en Cocina</strong><br>
+                        <span style="color: #78350f; font-size: 0.9rem;">
+                            Se detectaron <strong>{len(insumos_urg_resumen)} materias primas críticas</strong> próximas a vencer. Al priorizar estos platos en la carta o menú de turno, 
+                            la cadena puede transformar hasta <strong style="color: #b45309; font-size: 1.05rem;">${venta_total_rescatable:,.0f} CLP</strong> en ventas efectivas, evitando mermas operativas.
+                        </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                top_platos = df_sugeridos.head(3)
+                cols_top = st.columns(len(top_platos))
+                for idx, (_, p_fila) in enumerate(top_platos.iterrows()):
+                    with cols_top[idx]:
+                        with st.container(border=True):
+                            st.markdown(f"##### 🍽️ {p_fila['receta']}")
+                            st.caption(f"Categoría: **{p_fila['categoria']}** | Carta: **${p_fila['precio_carta']:,.0f}**")
+
+                            st.metric("Porciones Sugeridas", f"{p_fila['porciones']} platos", f"+${p_fila['venta_recuperable']:,.0f} CLP")
+
+                            badge_dias = "🔴 Urgente" if p_fila["dias_restantes"] <= 3 else "🟠 Prioridad"
+                            st.markdown(
+                                f"""
+                                <div style="font-size:0.82rem; background:#f8fafc; padding:8px; border-radius:6px; border:1px solid #e2e8f0;">
+                                    • <strong>Insumo en riesgo:</strong> {p_fila['kg_en_riesgo']:.1f} kg {p_fila['insumo_critico']}<br>
+                                    • <strong>Vencimiento:</strong> {p_fila['dias_restantes']} días restantes ({badge_dias})<br>
+                                    • <strong>Locales:</strong> {p_fila['locales']}
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(
+                                "<div style='margin-top:6px; font-size:0.78rem; color:#0369a1; font-weight:600;'>💡 Sugerencia: Ofrecer como especial del chef en turno almuerzo o promo 2×1.</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                with st.expander("🔍 Ver todas las recetas recomendadas para rescate de stock"):
+                    st.dataframe(
+                        df_sugeridos[[
+                            "receta", "categoria", "insumo_critico", "kg_en_riesgo", "porciones", "precio_carta", "venta_recuperable", "dias_restantes", "locales"
+                        ]],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "receta": "Plato Recomendado",
+                            "categoria": "Categoría",
+                            "insumo_critico": "Insumo Crítico",
+                            "kg_en_riesgo": st.column_config.NumberColumn("Kg en Riesgo", format="%.2f kg"),
+                            "porciones": st.column_config.NumberColumn("Platos a Elaborar", format="%d u."),
+                            "precio_carta": st.column_config.NumberColumn("Precio Carta", format="$%d"),
+                            "venta_recuperable": st.column_config.NumberColumn("Venta Potencial", format="$%d CLP"),
+                            "dias_restantes": st.column_config.NumberColumn("Días Restantes", format="%d d."),
+                            "locales": "Sucursales Afectadas",
+                        },
+                    )
+
+        st.markdown("---")
         # Gráficos interactivos
         col_g1, col_g2 = st.columns([1, 1.4])
 
@@ -425,6 +597,62 @@ with tab_alertas:
                     st.plotly_chart(fig_bar, use_container_width=True)
                 else:
                     st.bar_chart(stock_producto.set_index("producto"))
+
+        # Matriz de Dispersión Riesgo vs Capital
+        with st.container(border=True):
+            st.markdown("##### 🎯 Matriz de Dispersión: Riesgo Temporal vs Capital Inmovilizado por Lote")
+            st.caption(
+                "Mapeo forense de cada lote físico en inventario. Las partidas ubicadas en el **cuadrante superior izquierdo** "
+                "(alta valorización monetaria y pocos días de vida útil) representan el foco de alerta inmediata para la dirección."
+            )
+            if HAS_PLOTLY:
+                fig_scatter = px.scatter(
+                    inventario_df,
+                    x="dias_para_vencer",
+                    y="valor_inventario",
+                    size="cantidad",
+                    color="estado_alerta",
+                    hover_name="producto",
+                    hover_data={
+                        "local": True,
+                        "codigo_lote_proveedor": True,
+                        "fecha_vencimiento": True,
+                        "cantidad": ":.2f",
+                        "costo_unitario": ":$,.0f",
+                        "valor_inventario": ":$,.0f",
+                        "dias_para_vencer": True,
+                        "estado_alerta": False,
+                    },
+                    color_discrete_map={
+                        "🔴 Vencido": "#e63946",
+                        "🟠 Crítico (≤ 7 días)": "#f77f00",
+                        "🟡 Preventivo (8-30 días)": "#fcbf49",
+                        "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                    },
+                    labels={
+                        "dias_para_vencer": "Días Restantes de Vida Útil",
+                        "valor_inventario": "Capital Inmovilizado ($CLP)",
+                        "estado_alerta": "Nivel de Alerta",
+                        "cantidad": "Kilos en Lote",
+                    },
+                )
+                fig_scatter.add_vline(
+                    x=7,
+                    line_width=2,
+                    line_dash="dash",
+                    line_color="#e63946",
+                    annotation_text="Límite Crítico (≤ 7 días)",
+                    annotation_position="top left",
+                )
+                fig_scatter.update_layout(
+                    margin=dict(t=25, b=10, l=10, r=10),
+                    height=330,
+                    yaxis=dict(tickformat="$,.0f"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_scatter, use_container_width=True)
+            else:
+                st.dataframe(inventario_df[["producto", "local", "dias_para_vencer", "valor_inventario"]])
 
         # Gráfica de Riesgo de Venta y Exposición por Local
         st.markdown("---")
@@ -511,6 +739,54 @@ with tab_alertas:
                     pct_val = fila_rk["% Riesgo"]
                     icono_sem = "🔴" if pct_val > 20 else ("🟠" if pct_val > 0 else "🟢")
                     st.write(f"{icono_sem} **{loc_nombre}**: ${rsk_val:,.0f} CLP *({pct_val:.1f}% en riesgo)*")
+
+        # Módulo de Traspasos Preventivos Sugeridos (Rebalanceo Logístico)
+        if id_local_activo is None:
+            with st.container(border=True):
+                st.markdown("##### 🚚 Oportunidades de Rebalanceo Logístico (Traspasos Preventivos Sugeridos)")
+                st.caption(
+                    "Detección proactiva de asimetrías de abastecimiento: sucursales con materias primas críticas que pueden "
+                    "ser transferidas hacia locales con existencias en cero para acelerar su rotación y evitar pérdidas."
+                )
+                prods_crit_unicos = df_todas_sucursales[df_todas_sucursales["dias_para_vencer"] <= 7]["producto"].unique()
+                sugerencias_traspaso = []
+                todos_nombres_locales = sorted(df_todas_sucursales["local"].unique())
+
+                for p_nom in prods_crit_unicos:
+                    sub_p = df_todas_sucursales[df_todas_sucursales["producto"] == p_nom]
+                    stock_por_loc = sub_p.groupby("local")["cantidad"].sum().to_dict()
+                    locs_con_critico = sub_p[sub_p["dias_para_vencer"] <= 7].groupby("local")["cantidad"].sum()
+
+                    for loc_origen, cant_critica in locs_con_critico.items():
+                        for loc_destino in todos_nombres_locales:
+                            if loc_destino != loc_origen and stock_por_loc.get(loc_destino, 0.0) == 0.0:
+                                dias_min_prod = int(sub_p[sub_p["local"] == loc_origen]["dias_para_vencer"].min())
+                                cant_sug = round(cant_critica / 2.0, 1) if cant_critica > 2.0 else round(cant_critica, 1)
+                                sugerencias_traspaso.append({
+                                    "insumo": p_nom,
+                                    "origen": loc_origen,
+                                    "destino": loc_destino,
+                                    "cantidad": cant_sug,
+                                    "dias": dias_min_prod,
+                                })
+
+                if sugerencias_traspaso:
+                    col_trasp1, col_trasp2 = st.columns(2)
+                    for idx_t, sug in enumerate(sugerencias_traspaso[:4]):
+                        col_t_act = col_trasp1 if idx_t % 2 == 0 else col_trasp2
+                        with col_t_act:
+                            st.markdown(
+                                f"""
+                                <div style="background:#eff6ff; border:1px solid #bfdbfe; border-left:4px solid #3b82f6; border-radius:6px; padding:8px 12px; margin-bottom:8px;">
+                                    <strong>💡 Sugerencia #{idx_t+1}:</strong> {sug['insumo']}<br>
+                                    • De <strong>{sug['origen']}</strong> $\\rightarrow$ hacia <strong>{sug['destino']}</strong> (Sin stock)<br>
+                                    • Traspaso recomendado: <code>{sug['cantidad']} kg</code> (Vence en {sug['dias']} días)
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                else:
+                    st.info("✅ No se detectan desequilibrios críticos de inventario entre sucursales.")
 
         st.markdown("---")
 
@@ -754,128 +1030,318 @@ with tab_recepcion:
                 st.error(f"Error de validación: {err}")
 
 # ==============================================================================
-# TAB 3: SALIDAS POR CONSUMO EN COCINA (FEFO)
+# TAB 3: SALIDAS POR CONSUMO EN COCINA (FEFO Y RECETAS)
 # ==============================================================================
 with tab_cocina:
-    st.markdown("### 🍳 Registro de Salida a Cocina (Consumo Interno)")
+    st.markdown("### 🍳 Salidas a Cocina y Producción Culinaria")
     st.caption(
-        "Descuenta materias primas para preparación culinaria aplicando la "
-        "recomendación estricta **FEFO** (First Expired, First Out)."
+        "Control de consumos gastronómicos bajo criterio **FEFO** (First Expired, First Out). "
+        "Permite registrar producción por recetas estandarizadas (comandas por turno) o consumos directos por lote individual."
     )
-
-    if "voucher_cocina" in st.session_state:
-        v_coc = st.session_state.pop("voucher_cocina")
-        st.success("✅ Salida a cocina descontada satisfactoriamente del stock.")
-        st.markdown(
-            f"""
-            <div class="voucher-card" style="border-left: 5px solid #2a9d8f; background: #f0fdf4;">
-                <strong>🍳 Vale de Salida a Cocina #{v_coc['id_movimiento']}</strong><br>
-                • <strong>Insumo:</strong> {v_coc['producto']} (Lote: <code>{v_coc['lote']}</code>)<br>
-                • <strong>Cantidad consumida:</strong> <code>{v_coc['cantidad']:.3f} {v_coc['unidad']}</code><br>
-                • <strong>Nuevo stock remanente en este local:</strong> <code>{v_coc['nuevo_stock']:.3f} {v_coc['unidad']}</code><br>
-                • <strong>Referencia:</strong> {v_coc['referencia']}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
     if id_local_activo:
         local_cocina_id = id_local_activo
-        st.info(f"📍 Registrando consumo para la cocina del: **{nombre_local_activo}**")
+        st.info(f"📍 Operando en la cocina del: **{nombre_local_activo}**")
     else:
         opciones_locales_cocina = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
         local_cocina_id = st.selectbox(
-            "Seleccionar Local donde se prepara el insumo:",
+            "Seleccionar Local donde opera la cocina:",
             options=list(opciones_locales_cocina.keys()),
             format_func=lambda k: opciones_locales_cocina[k],
             key="sel_local_cocina",
         )
 
-    stock_disp_cocina = db.load_stock_disponible_local(int(local_cocina_id))
+    subtab_recetas, subtab_lote_manual = st.tabs(
+        ["📋 Producción por Recetas (Comanda / Turno)", "📦 Salida Manual por Lote Individual"]
+    )
 
-    if stock_disp_cocina.empty:
-        st.warning("⚠️ Este local no dispone de lotes con existencias positivas para consumir.")
-    else:
-        st.info(
-            "💡 **Criterio FEFO Activo**: La lista de selección sugiere y ordena automáticamente "
-            "los lotes cuya fecha de caducidad está más cercana para evitar mermas."
+    # --------------------------------------------------------------------------
+    # SUBTAB: PRODUCCIÓN POR RECETAS ESTANDARIZADAS
+    # --------------------------------------------------------------------------
+    with subtab_recetas:
+        st.markdown("#### 🍽️ Elaboración de Recetas y Descuento Automático FEFO")
+        st.caption(
+            "Configura las comandas del turno (ej. 10 Ceviches, 5 Lomo Saltado). El motor calcula el escandallo, "
+            "comprueba las existencias del local y descuenta automáticamente los lotes más próximos a vencer."
         )
 
-        dict_lotes_cocina = {
-            int(row["id_lote"]): row["display_label"]
-            for _, row in stock_disp_cocina.iterrows()
-        }
+        if "voucher_produccion" in st.session_state:
+            v_prod = st.session_state.pop("voucher_produccion")
+            st.success(f"✅ ¡Producción registrada exitosamente! Vale #{v_prod['id_movimiento']} generado y auditado.")
 
-        with st.container(border=True):
-            with st.form("form_salida_cocina", clear_on_submit=False):
-                lote_cocina_sel = st.selectbox(
-                    "Selecciona el lote a utilizar (ordenado por FEFO):*",
-                    options=list(dict_lotes_cocina.keys()),
-                    format_func=lambda k: dict_lotes_cocina[k],
-                    key="sel_lote_cocina_form",
+            with st.container(border=True):
+                col_vm1, col_vm2, col_vm3, col_vm4 = st.columns(4)
+                col_vm1.metric("Platos Elaborados", f"{v_prod['platos_totales']} u.")
+                col_vm2.metric("Venta Bruta Menú", f"${v_prod['venta_total']:,.0f}")
+                col_vm3.metric("Costo Insumos (FEFO)", f"${v_prod['costo_total_insumos']:,.0f}")
+                col_vm4.metric("Margen Bruto", f"${v_prod['margen_bruto']:,.0f}", f"{v_prod['pct_margen']:.1f}%")
+
+                st.markdown(f"**Turno:** `{v_prod['turno']}` | **Movimiento de Inventario:** `#{v_prod['id_movimiento']}`")
+
+                col_vp_left, col_vp_right = st.columns(2)
+                with col_vp_left:
+                    st.markdown("##### 🍲 Platos Preparados")
+                    for p_item in v_prod["detalle_platos"]:
+                        st.markdown(
+                            f"- **{p_item['cantidad_platos']}x** {p_item['receta']} — `${p_item['subtotal_venta']:,.0f}` "
+                            f"(Precio carta: ${p_item['precio_venta']:,.0f})"
+                        )
+
+                with col_vp_right:
+                    st.markdown("##### 🥩 Insumos Descontados por FEFO")
+                    for ins_item in v_prod["desglose_insumos"]:
+                        st.markdown(
+                            f"- **{ins_item['producto']}**: `{ins_item['cantidad_consumida']:.3f} {ins_item['unidad']}` "
+                            f"(Lote: <code>{ins_item['codigo_lote_proveedor']}</code> | Stock restante: {ins_item['nuevo_stock']:.3f} {ins_item['unidad']})",
+                            unsafe_allow_html=True,
+                        )
+
+        recetas_raw_df = db.load_recetas(solo_activas=True)
+        if recetas_raw_df.empty:
+            st.warning("⚠️ No hay recetas activas configuradas en la base de datos.")
+        else:
+            recetas_catalogo = (
+                recetas_raw_df[["id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min"]]
+                .drop_duplicates()
+                .sort_values(by=["categoria", "receta"])
+            )
+
+            col_cf1, col_cf2 = st.columns([1, 2])
+            with col_cf1:
+                turno_prod = st.selectbox(
+                    "Turno de Cocina / Servicio:*",
+                    ["Almuerzo (12:00 - 16:00)", "Tarde (16:00 - 20:00)", "Cena (20:00 - 00:00)", "Evento Especial"],
+                    key="sel_turno_produccion",
+                )
+            with col_cf2:
+                obs_prod = st.text_input(
+                    "Referencia de la comanda u observaciones:",
+                    placeholder="Ej. Comanda salón principal y pedidos delivery",
+                    key="txt_obs_produccion",
                 )
 
-                fila_lote_sel = stock_disp_cocina[stock_disp_cocina["id_lote"] == lote_cocina_sel].iloc[0]
-                max_disponible = float(fila_lote_sel["stock_disponible"])
-                unidad_medida = fila_lote_sel["unidad_medida"]
-                dias_rest = int(fila_lote_sel["dias_para_vencer"])
+            recetas_opciones = {
+                int(row["id_receta"]): f"{row['receta']} ({row['categoria']}) — ${row['precio_venta']:,.0f}"
+                for _, row in recetas_catalogo.iterrows()
+            }
 
-                col_c1, col_c2 = st.columns(2)
-                with col_c1:
-                    cant_cocina = st.number_input(
-                        f"Cantidad a consumir ({unidad_medida}):*",
-                        min_value=0.001,
-                        max_value=max_disponible,
-                        value=min(1.0, max_disponible),
-                        step=0.5,
-                        format="%.3f",
-                        help=f"Máximo disponible en el local: {max_disponible:.3f} {unidad_medida}",
-                    )
-                    ref_cocina = st.text_input(
-                        "Estación de cocina o partida:",
-                        placeholder="Ej. Cevichería, Parrilla, Turno Noche, Menú Almuerzo",
-                    )
+            recetas_seleccionadas = st.multiselect(
+                "Selecciona los platos a elaborar en este turno:*",
+                options=list(recetas_opciones.keys()),
+                default=[1, 3] if (1 in recetas_opciones and 3 in recetas_opciones) else list(recetas_opciones.keys())[:2],
+                format_func=lambda k: recetas_opciones[k],
+                key="multisel_recetas_cocina",
+            )
 
-                with col_c2:
-                    urgencia_badge = "🔴 Urgente" if dias_rest <= 7 else "🟢 Normal"
-                    st.markdown(
-                        f"""
-                        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px;">
-                            <strong>Ficha rápida del lote seleccionado:</strong><br>
-                            • <strong>Insumo:</strong> {fila_lote_sel['producto']}<br>
-                            • <strong>Lote Proveedor:</strong> <code>{fila_lote_sel['codigo_lote_proveedor']}</code><br>
-                            • <strong>Vencimiento:</strong> {fila_lote_sel['fecha_vencimiento']} ({dias_rest} días restantes) — {urgencia_badge}<br>
-                            • <strong>Stock disponible en local:</strong> <code>{max_disponible:.3f} {unidad_medida}</code>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    obs_cocina = st.text_area("Observaciones del consumo:", placeholder="Porciones elaboradas, control de mermas...", height=60)
+            if not recetas_seleccionadas:
+                st.info("Selecciona al menos una receta para configurar las porciones del turno.")
+            else:
+                st.markdown("##### 🔢 Cantidad de Porciones por Plato")
+                orden_platos = {}
+                cols_porciones = st.columns(min(len(recetas_seleccionadas), 4))
+                for idx, r_id in enumerate(recetas_seleccionadas):
+                    col_act = cols_porciones[idx % len(cols_porciones)]
+                    nom_r = recetas_catalogo.loc[recetas_catalogo["id_receta"] == r_id, "receta"].values[0]
+                    with col_act:
+                        cant = st.number_input(
+                            f"{nom_r}:",
+                            min_value=1,
+                            max_value=200,
+                            value=5,
+                            step=1,
+                            key=f"cant_receta_input_{r_id}",
+                        )
+                        orden_platos[r_id] = cant
 
-                st.markdown("---")
-                btn_salida_cocina = st.form_submit_button("🍳 Confirmar Salida a Cocina", type="primary", use_container_width=True)
-
-        if btn_salida_cocina:
-            try:
-                res_cocina = db.registrar_salida_cocina(
-                    id_local=int(local_cocina_id),
-                    id_lote=int(lote_cocina_sel),
-                    cantidad=float(cant_cocina),
-                    referencia=ref_cocina.strip() or "Salida a cocina",
-                    observaciones=obs_cocina.strip() or None,
+                # Cálculo de requerimientos y stock disponible
+                stock_local_df = db.load_stock_disponible_local(int(local_cocina_id))
+                stock_por_prod = (
+                    stock_local_df.groupby("id_producto")["stock_disponible"].sum().to_dict()
+                    if not stock_local_df.empty
+                    else {}
                 )
-                st.session_state["voucher_cocina"] = {
-                    "id_movimiento": res_cocina["id_movimiento"],
-                    "producto": fila_lote_sel["producto"],
-                    "lote": fila_lote_sel["codigo_lote_proveedor"],
-                    "cantidad": res_cocina["cantidad"],
-                    "unidad": unidad_medida,
-                    "nuevo_stock": res_cocina["nuevo_stock"],
-                    "referencia": ref_cocina.strip() or "Consumo estándar",
-                }
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error al registrar salida a cocina: {e}")
+
+                req_totales = {}
+                venta_estimada = 0
+                for r_id, cant in orden_platos.items():
+                    sub_df = recetas_raw_df[recetas_raw_df["id_receta"] == r_id]
+                    p_vta = float(sub_df.iloc[0]["precio_venta"])
+                    venta_estimada += p_vta * cant
+
+                    for _, ing in sub_df.iterrows():
+                        p_id = int(ing["id_producto"])
+                        kg_req = float(ing["cantidad_kg"]) * cant
+                        if p_id not in req_totales:
+                            req_totales[p_id] = {
+                                "nombre": ing["ingrediente"],
+                                "unidad": ing["unidad_medida"],
+                                "total_req": 0.0,
+                            }
+                        req_totales[p_id]["total_req"] += kg_req
+
+                st.markdown("##### 📊 Simulación de Consumo vs Stock Disponible en Sucursal")
+                filas_simulacion = []
+                hay_faltante = False
+
+                for p_id, datos in req_totales.items():
+                    disp = float(stock_por_prod.get(p_id, 0.0))
+                    req = datos["total_req"]
+                    estado_str = "✅ Suficiente" if disp >= req else f"❌ Faltan {(req - disp):.3f} {datos['unidad']}"
+                    if disp < req:
+                        hay_faltante = True
+
+                    filas_simulacion.append({
+                        "Insumo": datos["nombre"],
+                        "Requerido (Comanda)": f"{req:.3f} {datos['unidad']}",
+                        "Stock en Local": f"{disp:.3f} {datos['unidad']}",
+                        "Saldo Proyectado": f"{(disp - req):.3f} {datos['unidad']}",
+                        "Factibilidad": estado_str,
+                    })
+
+                simulacion_df = pd.DataFrame(filas_simulacion)
+                st.dataframe(simulacion_df, use_container_width=True, hide_index=True)
+
+                col_res1, col_res2, col_res3 = st.columns([1, 1, 1.5])
+                col_res1.metric("Total Platos a Elaborar", f"{sum(orden_platos.values())} u.")
+                col_res2.metric("Venta Bruta Proyectada", f"${venta_estimada:,.0f} CLP")
+
+                with col_res3:
+                    if hay_faltante:
+                        st.error("⚠️ Stock insuficiente en esta sucursal para completar la comanda. Ajuste las cantidades o solicite un traspaso desde otra sucursal.")
+                    else:
+                        st.success("✨ ¡Stock suficiente! Todos los insumos se descontarán automáticamente bajo FEFO.")
+
+                btn_confirmar_recetas = st.button(
+                    "🍳 Confirmar y Descontar Producción por FEFO",
+                    type="primary",
+                    disabled=hay_faltante,
+                    use_container_width=True,
+                    key="btn_exec_produccion_recetas",
+                )
+
+                if btn_confirmar_recetas:
+                    try:
+                        res_prod = db.consumir_produccion_recetas(
+                            id_local=int(local_cocina_id),
+                            orden_platos=orden_platos,
+                            turno=turno_prod,
+                            observaciones=obs_prod.strip() or f"Producción comanda {turno_prod}",
+                        )
+                        st.session_state["voucher_produccion"] = res_prod
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Error al registrar producción: {err}")
+
+    # --------------------------------------------------------------------------
+    # SUBTAB: SALIDA MANUAL POR LOTE INDIVIDUAL
+    # --------------------------------------------------------------------------
+    with subtab_lote_manual:
+        st.markdown("#### 📦 Salida Manual por Lote Específico")
+        st.caption(
+            "Permite dar salida puntual a un lote específico para consumo directo, pruebas de sabor o calibración de partidas."
+        )
+
+        if "voucher_cocina" in st.session_state:
+            v_coc = st.session_state.pop("voucher_cocina")
+            st.success("✅ Salida a cocina descontada satisfactoriamente del stock.")
+            st.markdown(
+                f"""
+                <div class="voucher-card" style="border-left: 5px solid #2a9d8f; background: #f0fdf4;">
+                    <strong>🍳 Vale de Salida a Cocina #{v_coc['id_movimiento']}</strong><br>
+                    • <strong>Insumo:</strong> {v_coc['producto']} (Lote: <code>{v_coc['lote']}</code>)<br>
+                    • <strong>Cantidad consumida:</strong> <code>{v_coc['cantidad']:.3f} {v_coc['unidad']}</code><br>
+                    • <strong>Nuevo stock remanente en este local:</strong> <code>{v_coc['nuevo_stock']:.3f} {v_coc['unidad']}</code><br>
+                    • <strong>Referencia:</strong> {v_coc['referencia']}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        stock_disp_cocina = db.load_stock_disponible_local(int(local_cocina_id))
+
+        if stock_disp_cocina.empty:
+            st.warning("⚠️ Este local no dispone de lotes con existencias positivas para consumir.")
+        else:
+            st.info(
+                "💡 **Criterio FEFO Activo**: La lista de selección sugiere y ordena automáticamente "
+                "los lotes cuya fecha de caducidad está más cercana para evitar mermas."
+            )
+
+            dict_lotes_cocina = {
+                int(row["id_lote"]): row["display_label"]
+                for _, row in stock_disp_cocina.iterrows()
+            }
+
+            with st.container(border=True):
+                with st.form("form_salida_cocina", clear_on_submit=False):
+                    lote_cocina_sel = st.selectbox(
+                        "Selecciona el lote a utilizar (ordenado por FEFO):*",
+                        options=list(dict_lotes_cocina.keys()),
+                        format_func=lambda k: dict_lotes_cocina[k],
+                        key="sel_lote_cocina_form",
+                    )
+
+                    fila_lote_sel = stock_disp_cocina[stock_disp_cocina["id_lote"] == lote_cocina_sel].iloc[0]
+                    max_disponible = float(fila_lote_sel["stock_disponible"])
+                    unidad_medida = fila_lote_sel["unidad_medida"]
+                    dias_rest = int(fila_lote_sel["dias_para_vencer"])
+
+                    col_c1, col_c2 = st.columns(2)
+                    with col_c1:
+                        cant_cocina = st.number_input(
+                            f"Cantidad a consumir ({unidad_medida}):*",
+                            min_value=0.001,
+                            max_value=max_disponible,
+                            value=min(1.0, max_disponible),
+                            step=0.5,
+                            format="%.3f",
+                            help=f"Máximo disponible en el local: {max_disponible:.3f} {unidad_medida}",
+                        )
+                        ref_cocina = st.text_input(
+                            "Estación de cocina o partida:",
+                            placeholder="Ej. Cevichería, Parrilla, Turno Noche, Menú Almuerzo",
+                        )
+
+                    with col_c2:
+                        urgencia_badge = "🔴 Urgente" if dias_rest <= 7 else "🟢 Normal"
+                        st.markdown(
+                            f"""
+                            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px;">
+                                <strong>Ficha rápida del lote seleccionado:</strong><br>
+                                • <strong>Insumo:</strong> {fila_lote_sel['producto']}<br>
+                                • <strong>Lote Proveedor:</strong> <code>{fila_lote_sel['codigo_lote_proveedor']}</code><br>
+                                • <strong>Vencimiento:</strong> {fila_lote_sel['fecha_vencimiento']} ({dias_rest} días restantes) — {urgencia_badge}<br>
+                                • <strong>Stock disponible en local:</strong> <code>{max_disponible:.3f} {unidad_medida}</code>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        obs_cocina = st.text_area("Observaciones del consumo:", placeholder="Porciones elaboradas, control de mermas...", height=60)
+
+                    st.markdown("---")
+                    btn_salida_cocina = st.form_submit_button("🍳 Confirmar Salida a Cocina", type="primary", use_container_width=True)
+
+            if btn_salida_cocina:
+                try:
+                    res_cocina = db.registrar_salida_cocina(
+                        id_local=int(local_cocina_id),
+                        id_lote=int(lote_cocina_sel),
+                        cantidad=float(cant_cocina),
+                        referencia=ref_cocina.strip() or "Salida a cocina",
+                        observaciones=obs_cocina.strip() or None,
+                    )
+                    st.session_state["voucher_cocina"] = {
+                        "id_movimiento": res_cocina["id_movimiento"],
+                        "producto": fila_lote_sel["producto"],
+                        "lote": fila_lote_sel["codigo_lote_proveedor"],
+                        "cantidad": res_cocina["cantidad"],
+                        "unidad": unidad_medida,
+                        "nuevo_stock": res_cocina["nuevo_stock"],
+                        "referencia": ref_cocina.strip() or "Consumo estándar",
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al registrar salida a cocina: {e}")
 
 # ==============================================================================
 # TAB 4: TRASPASOS ENTRE LOCALES
@@ -1440,8 +1906,8 @@ with tab_maestros:
         "Las altas y modificaciones se sincronizan de inmediato con los formularios de recepción e inventario."
     )
 
-    subtab_m_prov, subtab_m_prod = st.tabs(
-        ["🏢 Catálogo de Proveedores", "🥩 Catálogo de Materias Primas"]
+    subtab_m_prov, subtab_m_prod, subtab_m_recetas = st.tabs(
+        ["🏢 Catálogo de Proveedores", "🥩 Catálogo de Materias Primas", "🍽️ Fichas Técnicas de Recetas"]
     )
 
     # --------------------------------------------------------------------------
@@ -1671,3 +2137,59 @@ with tab_maestros:
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Error al actualizar producto: {err}")
+
+    # --------------------------------------------------------------------------
+    # SUBTAB: FICHAS TÉCNICAS DE RECETAS (ESCANDALLO)
+    # --------------------------------------------------------------------------
+    with subtab_m_recetas:
+        st.markdown("##### 🍽️ Fichas Técnicas y Escandallo de Recetas")
+        st.caption(
+            "Estandarización de porciones, gramajes e insumos cárnicos/marinos para cada plato del menú de Mamá Qocha. "
+            "Garantiza el control de costos culinarios, la trazabilidad higiénica y la consistencia en todos los locales."
+        )
+
+        recetas_cat_df = db.load_recetas_catalogo(solo_activas=False)
+        recetas_det_df = db.load_recetas(solo_activas=False)
+
+        if recetas_cat_df.empty:
+            st.info("No hay recetas registradas en el catálogo maestro.")
+        else:
+            col_mr1, col_mr2, col_mr3 = st.columns(3)
+            col_mr1.metric("Recetas Estandarizadas", f"{len(recetas_cat_df)} platos")
+            col_mr2.metric("Categorías de Menú", f"{recetas_cat_df['categoria'].nunique()}")
+            col_mr3.metric("Ticket Promedio Carta", f"${recetas_cat_df['precio_venta'].mean():,.0f} CLP")
+
+            st.dataframe(
+                recetas_cat_df[[
+                    "id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min", "escandallo_ingredientes", "activo"
+                ]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id_receta": st.column_config.NumberColumn("ID", width="small"),
+                    "receta": "Nombre del Plato",
+                    "categoria": "Categoría",
+                    "precio_venta": st.column_config.NumberColumn("Precio Venta", format="$%d CLP"),
+                    "tiempo_preparacion_min": st.column_config.NumberColumn("Tiempo (min)", width="small"),
+                    "escandallo_ingredientes": "Escandallo / Gramaje Estándar por Porción",
+                    "activo": st.column_config.CheckboxColumn("Activo", width="small"),
+                },
+            )
+
+            with st.expander("🔍 Ver Detalle de Gramajes por Plato (Ficha Técnica Desglosada)"):
+                st.dataframe(
+                    recetas_det_df[[
+                        "receta", "categoria", "ingrediente", "cantidad_kg", "unidad_medida", "precio_venta"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "receta": "Plato",
+                        "categoria": "Categoría",
+                        "ingrediente": "Materia Prima",
+                        "cantidad_kg": st.column_config.NumberColumn("Gramaje Requerido (kg)", format="%.3f kg"),
+                        "unidad_medida": "Unidad",
+                        "precio_venta": st.column_config.NumberColumn("Precio Venta", format="$%d CLP"),
+                    },
+                )
+
