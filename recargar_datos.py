@@ -14,7 +14,8 @@ def obtener_db_url() -> str:
     if len(sys.argv) > 1 and sys.argv[1].startswith("postgres"):
         return sys.argv[1]
     
-    url = os.getenv("DATABASE_URL")
+    # En Neon, las migraciones/esquemas DDL prefieren conexión directa (unpooled)
+    url = os.getenv("DATABASE_URL_UNPOOLED") or os.getenv("DATABASE_URL")
     if not url:
         pg_host = os.getenv("PG_HOST", "localhost")
         pg_port = os.getenv("PG_PORT", "5432")

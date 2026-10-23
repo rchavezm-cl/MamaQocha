@@ -29,8 +29,8 @@ if not DATABASE_URL:
 elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+psycopg://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-# Crear el motor de SQLAlchemy
-engine = create_engine(DATABASE_URL)
+# Crear el motor de SQLAlchemy con soporte para reconexión automática en Postgres serverless
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 
 
 def load_locales() -> pd.DataFrame:

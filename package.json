@@ -1,0 +1,13 @@
+{
+  "name": "mama-qocha",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "python -m py_compile app.py db.py recargar_datos.py test_neon_services.py",
+    "start": "streamlit run app.py",
+    "test": "python test_neon_services.py"
+  },
+  "dependencies": {
+    "@neon/config": "^1.9.3",
+    "@neon/env": "^1.6.4"
+  }
+}
