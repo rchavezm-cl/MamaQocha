@@ -83,15 +83,19 @@ st.markdown(
     <style>
     /* Estilos globales y tipografía */
     .hero-container {
-        background: linear-gradient(135deg, #0b1f3a 0%, #163863 55%, #1b497e 100%);
-        border: 1px solid rgba(255, 255, 255, 0.12);
+        background:
+            radial-gradient(circle at 88% 18%, rgba(56, 189, 248, 0.18), transparent 42%),
+            radial-gradient(circle at 12% 85%, rgba(245, 158, 11, 0.14), transparent 38%),
+            linear-gradient(135deg, #09192f 0%, #112d4e 55%, #163e6c 100%);
+        border: 1px solid rgba(255, 255, 255, 0.14);
         border-top: 4px solid #f59e0b;
-        border-radius: 14px;
-        padding: 22px 28px;
+        border-radius: 16px;
+        padding: 20px 26px;
         color: #ffffff;
-        margin-bottom: 18px;
-        box-shadow: 0 8px 24px -4px rgba(13, 43, 69, 0.25);
+        margin-bottom: 14px;
+        box-shadow: 0 10px 28px -6px rgba(9, 25, 47, 0.32);
         position: relative;
+        overflow: hidden;
     }
     .hero-flex-top {
         display: flex;
@@ -107,17 +111,16 @@ st.markdown(
         gap: 16px;
     }
     .hero-icon-box {
-        width: 50px;
-        height: 50px;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.12);
-        border: 1px solid rgba(255, 255, 255, 0.22);
+        width: 56px;
+        height: 56px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.2) 0%, rgba(56, 189, 248, 0.15) 100%);
+        border: 1.5px solid rgba(245, 158, 11, 0.55);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 2rem;
         flex-shrink: 0;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2);
     }
     .hero-title-text {
         font-size: 1.85rem;
@@ -131,30 +134,57 @@ st.markdown(
         flex-wrap: wrap;
     }
     .hero-version-pill {
-        font-size: 0.72rem;
-        font-weight: 700;
-        background: #f59e0b;
-        color: #78350f;
-        padding: 3px 8px;
+        font-size: 0.7rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+        color: #451a03;
+        padding: 3px 10px;
         border-radius: 20px;
-        letter-spacing: 0.4px;
+        letter-spacing: 0.5px;
         text-transform: uppercase;
+        box-shadow: 0 2px 6px rgba(245, 158, 11, 0.3);
     }
     .hero-subtitle {
-        font-size: 0.92rem;
+        font-size: 0.9rem;
         color: #cbd5e1;
         margin-top: 3px;
         line-height: 1.35;
     }
-    .hero-status-widget {
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        border-radius: 10px;
-        padding: 8px 14px;
+    .hero-pulse-hud {
+        background: rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 12px;
+        padding: 10px 16px;
+        backdrop-filter: blur(8px);
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+    }
+    .hero-pulse-item {
         display: flex;
         flex-direction: column;
-        gap: 3px;
-        min-width: 210px;
+        gap: 2px;
+    }
+    .hero-pulse-divider {
+        width: 1px;
+        height: 30px;
+        background: rgba(255, 255, 255, 0.16);
+    }
+    .hero-pulse-label {
+        font-size: 0.68rem;
+        color: #94a3b8;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .hero-pulse-val {
+        font-size: 0.88rem;
+        font-weight: 700;
+        color: #f8fafc;
+        display: flex;
+        align-items: center;
+        gap: 5px;
     }
     .hero-badge-container {
         display: flex;
@@ -164,13 +194,13 @@ st.markdown(
         border-top: 1px solid rgba(255, 255, 255, 0.1);
     }
     .hero-badge {
-        background: rgba(255, 255, 255, 0.12);
-        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.18);
         border-radius: 20px;
         padding: 4px 12px;
-        font-size: 0.78rem;
+        font-size: 0.76rem;
         font-weight: 600;
-        color: #f8fafc;
+        color: #f1f5f9;
     }
 
     /* Tarjetas de métricas visuales (KPIs) */
@@ -259,57 +289,72 @@ st.markdown(
         margin: 12px 0;
     }
 
-    /* Pestañas modernas tipo Segmented Control / Pills */
+    /* Pestañas modernas tipo Segmented Control / Pills (React Aria + BaseWeb) */
+    div[data-testid="stTabs"] [role="tablist"],
     div[data-testid="stTabs"] [data-baseweb="tab-list"],
+    .stTabs [role="tablist"],
     .stTabs [data-baseweb="tab-list"] {
         gap: 6px !important;
         background-color: #f1f5f9 !important;
         padding: 6px !important;
         border-radius: 12px !important;
-        border: 1px solid #e2e8f0 !important;
+        border: 1.5px solid #cbd5e1 !important;
         overflow-x: auto !important;
         white-space: nowrap !important;
-        scrollbar-width: thin !important;
+        scrollbar-width: none !important;
         -webkit-overflow-scrolling: touch !important;
+        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.05) !important;
     }
+    div[data-testid="stTabs"] [role="tablist"]::after,
+    .stTabs [role="tablist"]::after,
+    div[data-testid="stTab"] .react-aria-SelectionIndicator,
     div[data-testid="stTabs"] [data-baseweb="tab-border"],
     div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
     .stTabs [data-baseweb="tab-border"],
     .stTabs [data-baseweb="tab-highlight"] {
         display: none !important;
     }
+    div[data-testid="stTab"],
+    div[data-testid="stTabs"] [role="tab"],
     div[data-testid="stTabs"] button[data-baseweb="tab"],
-    div[data-testid="stTabs"] button[role="tab"],
+    .stTabs [role="tab"],
     .stTabs button[data-baseweb="tab"] {
-        height: 38px !important;
-        padding: 0 14px !important;
-        border-radius: 8px !important;
+        height: 40px !important;
+        padding: 0 16px !important;
+        border-radius: 9px !important;
         font-weight: 600 !important;
-        font-size: 0.85rem !important;
+        font-size: 0.86rem !important;
         color: #475569 !important;
-        border: none !important;
+        border: 1px solid transparent !important;
         background-color: transparent !important;
         transition: all 0.2s ease-in-out !important;
         white-space: nowrap !important;
     }
+    div[data-testid="stTab"]:hover,
+    div[data-testid="stTab"][data-hovered],
+    div[data-testid="stTabs"] [role="tab"]:hover,
     div[data-testid="stTabs"] button[data-baseweb="tab"]:hover,
-    div[data-testid="stTabs"] button[role="tab"]:hover,
-    .stTabs button[data-baseweb="tab"]:hover {
+    .stTabs [role="tab"]:hover {
         color: #0d2b45 !important;
-        background-color: rgba(255, 255, 255, 0.7) !important;
+        background-color: #ffffff !important;
+        border-color: #e2e8f0 !important;
     }
-    div[data-testid="stTabs"] button[aria-selected="true"],
+    div[data-testid="stTab"][aria-selected="true"],
+    div[data-testid="stTab"][data-selected],
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"],
+    .stTabs [role="tab"][aria-selected="true"],
     .stTabs button[aria-selected="true"] {
-        background-color: #0d2b45 !important;
+        background: linear-gradient(135deg, #0d2b45 0%, #163863 100%) !important;
         color: #ffffff !important;
-        box-shadow: 0 2px 8px rgba(13, 43, 69, 0.25) !important;
+        border: 1px solid #f59e0b !important;
+        box-shadow: 0 3px 10px rgba(13, 43, 69, 0.25) !important;
         font-weight: 700 !important;
     }
-    div[data-testid="stTabs"] button[aria-selected="true"] p,
-    div[data-testid="stTabs"] button[aria-selected="true"] span,
-    div[data-testid="stTabs"] button[aria-selected="true"] div,
-    .stTabs button[aria-selected="true"] p,
-    .stTabs button[aria-selected="true"] span {
+    div[data-testid="stTab"][aria-selected="true"] *,
+    div[data-testid="stTab"][data-selected] *,
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"] *,
+    .stTabs [role="tab"][aria-selected="true"] *,
+    .stTabs button[aria-selected="true"] * {
         color: #ffffff !important;
     }
 
@@ -730,15 +775,24 @@ st.markdown(
         .hero-container {
             padding: 16px 14px !important;
             margin-bottom: 14px !important;
-            border-radius: 10px !important;
+            border-radius: 12px !important;
         }
-        .hero-title {
-            font-size: 1.35rem !important;
+        .hero-title-text {
+            font-size: 1.4rem !important;
             line-height: 1.25 !important;
         }
         .hero-subtitle {
-            font-size: 0.85rem !important;
-            margin-bottom: 10px !important;
+            font-size: 0.82rem !important;
+            margin-bottom: 6px !important;
+        }
+        .hero-pulse-hud {
+            width: 100% !important;
+            justify-content: space-between !important;
+            padding: 8px 12px !important;
+            gap: 10px !important;
+        }
+        .hero-pulse-divider {
+            display: none !important;
         }
         .hero-badge-container {
             gap: 6px !important;
@@ -769,10 +823,12 @@ st.markdown(
             padding: 10px 12px !important;
         }
         /* Pestañas con deslizamiento táctil horizontal */
+        div[data-testid="stTabs"] [role="tablist"],
         .stTabs [data-baseweb="tab-list"] {
             padding: 4px !important;
             gap: 4px !important;
         }
+        div[data-testid="stTab"],
         .stTabs [data-baseweb="tab"] {
             height: 35px !important;
             padding: 0 10px !important;
@@ -876,38 +932,62 @@ st.sidebar.caption("Proyecto Académico Demo Funcional")
 # ==============================================================================
 # HERO HEADER BANNER
 # ==============================================================================
-modo_badge = f"📍 {nombre_local_activo}" if id_local_activo else "🌐 Modo Consolidado (5 Locales)"
+modo_badge = f"📍 {nombre_local_activo}" if id_local_activo else "🌐 Consolidado (5 Locales)"
+lotes_urg_hero = int(metricas["vencidos"] + metricas["criticos"])
+color_urg_hero = "#f87171" if lotes_urg_hero > 0 else "#4ade80"
+icono_urg_hero = "🚨" if lotes_urg_hero > 0 else "✅"
+
 st.markdown(
     f"""
     <div class="hero-container">
         <div class="hero-flex-top">
             <div class="hero-brand-group">
-                <div class="hero-icon-box">🦙</div>
+                <div class="hero-icon-box">
+                    <svg width="34" height="34" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="18" cy="13" r="6" fill="url(#sunGrad)" />
+                        <path d="M4 24C7.5 21 11 21 14.5 24C18 27 21.5 27 25 24C28.5 21 30.5 22 32 23.5" stroke="#38bdf8" stroke-width="2.6" stroke-linecap="round"/>
+                        <path d="M6 29.5C9.5 26.5 13 26.5 16.5 29.5C20 32.5 23.5 32.5 27 29.5C29 27.8 30.5 28 31.5 29" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round"/>
+                        <path d="M18 3V5M9.5 6.5L11 8M26.5 6.5L25 8" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
+                        <defs>
+                            <linearGradient id="sunGrad" x1="12" y1="7" x2="24" y2="19" gradientUnits="userSpaceOnUse">
+                                <stop stop-color="#fde047"/>
+                                <stop offset="1" stop-color="#f59e0b"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
                 <div>
                     <h1 class="hero-title-text">
                         Mamá Qocha
                         <span class="hero-version-pill">v2.4 Enterprise</span>
                     </h1>
                     <div class="hero-subtitle">
-                        Sistema Integral de Control de Trazabilidad, Rotación FEFO y Rescate de Insumos Críticos
+                        Control Gastronómico de Trazabilidad, Rotación FEFO y Rescate de Insumos Críticos
                     </div>
                 </div>
             </div>
-            <div class="hero-status-widget">
-                <div style="font-size:0.72rem; color:#94a3b8; font-weight:700; text-transform:uppercase;">Sesión Operativa:</div>
-                <div style="font-size:0.88rem; font-weight:700; color:#38bdf8; display:flex; align-items:center; gap:6px;">
-                    {modo_badge}
+            <div class="hero-pulse-hud">
+                <div class="hero-pulse-item">
+                    <span class="hero-pulse-label">Vista Operativa</span>
+                    <span class="hero-pulse-val" style="color:#38bdf8;">{modo_badge}</span>
                 </div>
-                <div style="font-size:0.74rem; color:#e2e8f0; margin-top:2px;">
-                    🟢 PostgreSQL 18 Online | 5 Locales
+                <div class="hero-pulse-divider"></div>
+                <div class="hero-pulse-item">
+                    <span class="hero-pulse-label">Stock Físico</span>
+                    <span class="hero-pulse-val">{metricas['total_cantidad']:,.1f} kg <span style="font-size:0.75rem; color:#94a3b8; font-weight:500;">({metricas['total_lotes']} lotes)</span></span>
+                </div>
+                <div class="hero-pulse-divider"></div>
+                <div class="hero-pulse-item">
+                    <span class="hero-pulse-label">Alerta FEFO</span>
+                    <span class="hero-pulse-val" style="color:{color_urg_hero};">{icono_urg_hero} {lotes_urg_hero} lotes críticos</span>
                 </div>
             </div>
         </div>
         <div class="hero-badge-container">
-            <span class="hero-badge">🟢 Base de Datos Conectada</span>
-            <span class="hero-badge">🏢 5 Sucursales Interconectadas</span>
-            <span class="hero-badge">📅 Fecha: {date.today().strftime('%d-%m-%Y')}</span>
+            <span class="hero-badge">🟢 Motor PostgreSQL 18 (Neon Cloud)</span>
             <span class="hero-badge">⚖️ Despacho FEFO / FIFO Automatizado</span>
+            <span class="hero-badge">🛡️ Control Sanitario HACCP (≤ 4°C)</span>
+            <span class="hero-badge">📅 Operación: {date.today().strftime('%d-%m-%Y')}</span>
         </div>
     </div>
     """,
