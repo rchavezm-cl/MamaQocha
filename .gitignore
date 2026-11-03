@@ -6,3 +6,4 @@ __pycache__/
 venv/
 .neon
 node_modules/
+sincronizar_a_nube.py

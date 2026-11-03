@@ -1,7 +1,10 @@
+import os
+import json
 from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
+import streamlit.components.v1 as components
 
 try:
     import plotly.express as px
@@ -16,6 +19,53 @@ from sqlalchemy.exc import SQLAlchemyError
 
 import db
 importlib.reload(db)
+
+def render_echarts(options: dict, height: int = 280, key: str = "chart"):
+    """Renderiza gráficos Apache ECharts nativos con soporte responsivo y animación fluida."""
+    chart_id = f"echart_{key}"
+    json_options = json.dumps(options, ensure_ascii=False)
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+        <style>
+            html, body {{
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            }}
+            #{chart_id} {{
+                width: 100%;
+                height: {height}px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="{chart_id}"></div>
+        <script>
+            (function() {{
+                var chartDom = document.getElementById('{chart_id}');
+                var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
+                var option = {json_options};
+                myChart.setOption(option);
+                window.addEventListener('resize', function() {{
+                    myChart.resize();
+                }});
+                window.addEventListener('orientationchange', function() {{
+                    setTimeout(function() {{ myChart.resize(); }}, 150);
+                }});
+            }})();
+        </script>
+    </body>
+    </html>
+    """
+    components.html(html_code, height=height + 8)
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL Y ESTILOS
@@ -33,39 +83,94 @@ st.markdown(
     <style>
     /* Estilos globales y tipografía */
     .hero-container {
-        background: linear-gradient(135deg, #0d2b45 0%, #203c56 60%, #1a4d6f 100%);
-        border-radius: 12px;
+        background: linear-gradient(135deg, #0b1f3a 0%, #163863 55%, #1b497e 100%);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-top: 4px solid #f59e0b;
+        border-radius: 14px;
         padding: 22px 28px;
         color: #ffffff;
-        margin-bottom: 22px;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.12);
+        margin-bottom: 18px;
+        box-shadow: 0 8px 24px -4px rgba(13, 43, 69, 0.25);
+        position: relative;
     }
-    .hero-title {
+    .hero-flex-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+    }
+    .hero-brand-group {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
+    .hero-icon-box {
+        width: 50px;
+        height: 50px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 2rem;
+        flex-shrink: 0;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+    .hero-title-text {
         font-size: 1.85rem;
-        font-weight: 700;
+        font-weight: 800;
         margin: 0;
         color: #ffffff;
         letter-spacing: -0.5px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .hero-version-pill {
+        font-size: 0.72rem;
+        font-weight: 700;
+        background: #f59e0b;
+        color: #78350f;
+        padding: 3px 8px;
+        border-radius: 20px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
     }
     .hero-subtitle {
-        font-size: 0.95rem;
-        color: #d0e1fd;
-        margin-top: 4px;
-        margin-bottom: 12px;
+        font-size: 0.92rem;
+        color: #cbd5e1;
+        margin-top: 3px;
+        line-height: 1.35;
+    }
+    .hero-status-widget {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 10px;
+        padding: 8px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 210px;
     }
     .hero-badge-container {
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
+        padding-top: 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
     }
     .hero-badge {
-        background: rgba(255, 255, 255, 0.15);
-        border: 1px solid rgba(255, 255, 255, 0.25);
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 20px;
         padding: 4px 12px;
-        font-size: 0.8rem;
-        font-weight: 500;
-        color: #f1f7ff;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #f8fafc;
     }
 
     /* Tarjetas de métricas visuales (KPIs) */
@@ -153,6 +258,527 @@ st.markdown(
         padding: 14px 18px;
         margin: 12px 0;
     }
+
+    /* Pestañas modernas tipo Segmented Control / Pills */
+    div[data-testid="stTabs"] [data-baseweb="tab-list"],
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 6px !important;
+        background-color: #f1f5f9 !important;
+        padding: 6px !important;
+        border-radius: 12px !important;
+        border: 1px solid #e2e8f0 !important;
+        overflow-x: auto !important;
+        white-space: nowrap !important;
+        scrollbar-width: thin !important;
+        -webkit-overflow-scrolling: touch !important;
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-border"],
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+    .stTabs [data-baseweb="tab-border"],
+    .stTabs [data-baseweb="tab-highlight"] {
+        display: none !important;
+    }
+    div[data-testid="stTabs"] button[data-baseweb="tab"],
+    div[data-testid="stTabs"] button[role="tab"],
+    .stTabs button[data-baseweb="tab"] {
+        height: 38px !important;
+        padding: 0 14px !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        font-size: 0.85rem !important;
+        color: #475569 !important;
+        border: none !important;
+        background-color: transparent !important;
+        transition: all 0.2s ease-in-out !important;
+        white-space: nowrap !important;
+    }
+    div[data-testid="stTabs"] button[data-baseweb="tab"]:hover,
+    div[data-testid="stTabs"] button[role="tab"]:hover,
+    .stTabs button[data-baseweb="tab"]:hover {
+        color: #0d2b45 !important;
+        background-color: rgba(255, 255, 255, 0.7) !important;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"],
+    .stTabs button[aria-selected="true"] {
+        background-color: #0d2b45 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(13, 43, 69, 0.25) !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stTabs"] button[aria-selected="true"] p,
+    div[data-testid="stTabs"] button[aria-selected="true"] span,
+    div[data-testid="stTabs"] button[aria-selected="true"] div,
+    .stTabs button[aria-selected="true"] p,
+    .stTabs button[aria-selected="true"] span {
+        color: #ffffff !important;
+    }
+
+    /* Botones interactivos y amigables al tacto */
+    div.stButton > button:first-child {
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.88rem;
+        transition: all 0.2s ease;
+        min-height: 40px;
+    }
+    div.stButton > button:first-child:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 10px rgba(13, 43, 69, 0.12);
+    }
+    div.stDownloadButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        min-height: 40px;
+        transition: all 0.2s ease;
+    }
+
+    /* Contenedores con borde y tarjetas (Clean SaaS look) */
+    [data-testid="stVerticalBlockBorderWrapper"] > div {
+        border-radius: 12px !important;
+        border: 1px solid #e2e8f0 !important;
+        background: #ffffff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.03);
+    }
+
+    /* Tarjetas de métricas nativas */
+    [data-testid="stMetric"] {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    [data-testid="stMetricLabel"] {
+        font-weight: 600;
+        color: #64748b;
+        font-size: 0.8rem;
+    }
+    [data-testid="stMetricValue"] {
+        font-weight: 700;
+        color: #0d2b45;
+    }
+
+    /* Métricas en la barra lateral: tamaño adaptado para evitar truncamiento (...) */
+    [data-testid="stSidebar"] [data-testid="stMetric"] {
+        padding: 8px 10px;
+        background: #ffffff;
+    }
+    [data-testid="stSidebar"] [data-testid="stMetricValue"],
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] * {
+        font-size: 1.15rem !important;
+        white-space: nowrap !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+
+    /* =========================================================================
+       HERO FINANCIERO Y DISTRIBUCIÓN DE RIESGO
+       ========================================================================= */
+    .hero-fin-card {
+        background: #ffffff;
+        border: 2px solid #cbd5e1;
+        border-radius: 14px;
+        padding: 20px 22px;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+        margin-bottom: 16px;
+    }
+    .hero-fin-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 24px;
+        align-items: center;
+    }
+    @media (max-width: 768px) {
+        .hero-fin-grid {
+            grid-template-columns: 1fr;
+            gap: 16px;
+        }
+    }
+    .hero-fin-col {
+        display: flex;
+        flex-direction: column;
+    }
+    .hero-fin-title {
+        font-size: 0.76rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #64748b;
+        margin-bottom: 4px;
+    }
+    .hero-fin-val-blue {
+        font-size: 1.85rem;
+        font-weight: 800;
+        color: #0d2b45;
+        line-height: 1.2;
+    }
+    .hero-fin-val-red {
+        font-size: 1.85rem;
+        font-weight: 800;
+        color: #e63946;
+        line-height: 1.2;
+    }
+    .hero-fin-badge-crit {
+        background: #fee2e2;
+        color: #b91c1c;
+        border: 1px solid #fecaca;
+        font-size: 0.78rem;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 20px;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-top: 5px;
+        width: fit-content;
+    }
+    .risk-bar-container {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px dashed #e2e8f0;
+    }
+    .risk-bar {
+        display: flex;
+        height: 10px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #f1f5f9;
+        margin-bottom: 8px;
+    }
+    .risk-bar-seg {
+        height: 100%;
+        transition: width 0.3s ease;
+    }
+    .risk-legend-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        font-size: 0.74rem;
+        color: #475569;
+    }
+
+    /* =========================================================================
+       TARJETAS DEL SEMÁFORO MODULAR
+       ========================================================================= */
+    .semaforo-card {
+        background: #ffffff;
+        border: 2px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 14px 16px;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+        transition: all 0.2s ease-in-out;
+        margin-bottom: 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }
+    .semaforo-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+        border-color: #0d2b45;
+    }
+    .semaforo-header {
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        margin-bottom: 6px;
+    }
+    .semaforo-num-flex {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 4px;
+    }
+    .semaforo-num {
+        font-size: 1.85rem;
+        font-weight: 800;
+        line-height: 1;
+    }
+    .semaforo-monto-pill {
+        font-size: 0.78rem;
+        font-weight: 700;
+        padding: 3px 8px;
+        border-radius: 6px;
+        white-space: nowrap;
+    }
+    .semaforo-sub {
+        font-size: 0.73rem;
+        color: #64748b;
+        margin-top: 4px;
+    }
+
+    /* =========================================================================
+       TARJETAS OPERATIVAS (KPIS DE GESTIÓN)
+       ========================================================================= */
+    .op-kpi-card {
+        background: #ffffff;
+        border: 2px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 14px 16px;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+        transition: all 0.2s ease-in-out;
+        margin-bottom: 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        height: 100%;
+    }
+    .op-kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+        border-color: #0d2b45;
+    }
+    .op-kpi-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+    .op-kpi-icon-box {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.15rem;
+        flex-shrink: 0;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    }
+    .op-kpi-title {
+        font-size: 0.76rem;
+        font-weight: 700;
+        color: #475569;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        line-height: 1.25;
+    }
+    .op-kpi-val {
+        font-size: 1.55rem;
+        font-weight: 800;
+        color: #0f172a;
+        line-height: 1.15;
+        margin-bottom: 6px;
+    }
+    .op-kpi-tag {
+        font-size: 0.73rem;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 6px;
+        display: inline-block;
+        width: fit-content;
+    }
+
+    /* =========================================================================
+       TARJETAS DE RECETA RECOMENDADA VIBRANTES (PLAN DE CHOQUE)
+       ========================================================================= */
+    .recipe-card {
+        background: #ffffff;
+        border: 2px solid #cbd5e1;
+        border-radius: 14px;
+        padding: 16px 18px;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+        transition: all 0.25s ease-in-out;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        margin-bottom: 12px;
+        position: relative;
+    }
+    .recipe-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.14);
+        border-color: #0d2b45;
+    }
+    .recipe-card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+    }
+    .recipe-cat-badge {
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #475569;
+        background: #f1f5f9;
+        padding: 3px 8px;
+        border-radius: 6px;
+    }
+    .recipe-urg-critico {
+        background: #fee2e2;
+        color: #b91c1c;
+        font-size: 0.73rem;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 12px;
+        border: 1px solid #fecaca;
+    }
+    .recipe-urg-alta {
+        background: #ffedd5;
+        color: #c2410c;
+        font-size: 0.73rem;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 12px;
+        border: 1px solid #fed7aa;
+    }
+    .recipe-header-flex {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 14px;
+    }
+    .recipe-avatar {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.4rem;
+        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12);
+        flex-shrink: 0;
+    }
+    .recipe-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #0f172a;
+        line-height: 1.25;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .recipe-carta {
+        font-size: 0.8rem;
+        color: #64748b;
+        margin-top: 2px;
+    }
+    .recipe-kpi-banner {
+        background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+        border: 1px solid #bbf7d0;
+        border-radius: 10px;
+        padding: 12px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+    }
+    .recipe-kpi-num {
+        font-size: 1.55rem;
+        font-weight: 800;
+        color: #14532d;
+        line-height: 1;
+    }
+    .recipe-kpi-gain {
+        font-size: 1.15rem;
+        font-weight: 800;
+        color: #15803d;
+        line-height: 1;
+    }
+    .recipe-kpi-sub {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: #166534;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        margin-top: 3px;
+    }
+    .recipe-meta-list {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+        font-size: 0.8rem;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+    }
+    .recipe-meta-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 6px;
+    }
+    .recipe-footer-callout {
+        background: #f0f9ff;
+        border-left: 3px solid #0284c7;
+        border-radius: 0 6px 6px 0;
+        padding: 7px 10px;
+        font-size: 0.76rem;
+        color: #0369a1;
+        line-height: 1.35;
+    }
+
+    /* =========================================================================
+       RESPONSIVE DESIGN Y COMPATIBILIDAD MÓVIL
+       ========================================================================= */
+    @media (max-width: 768px) {
+        /* Espaciado del lienzo en teléfonos */
+        .main .block-container {
+            padding-top: 1.5rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-bottom: 2rem !important;
+        }
+        /* Hero Banner compacto para celular */
+        .hero-container {
+            padding: 16px 14px !important;
+            margin-bottom: 14px !important;
+            border-radius: 10px !important;
+        }
+        .hero-title {
+            font-size: 1.35rem !important;
+            line-height: 1.25 !important;
+        }
+        .hero-subtitle {
+            font-size: 0.85rem !important;
+            margin-bottom: 10px !important;
+        }
+        .hero-badge-container {
+            gap: 6px !important;
+        }
+        .hero-badge {
+            font-size: 0.72rem !important;
+            padding: 2px 8px !important;
+        }
+        /* Ajustar tarjetas de KPIs en pantallas pequeñas */
+        .kpi-card {
+            padding: 12px 14px !important;
+            margin-bottom: 8px !important;
+        }
+        .kpi-num {
+            font-size: 1.4rem !important;
+        }
+        /* Línea de tiempo colapsada verticalmente en móvil */
+        .timeline-wrapper {
+            flex-direction: column !important;
+            gap: 8px !important;
+            margin: 12px 0 16px 0 !important;
+        }
+        .timeline-step {
+            margin: 0 !important;
+            border-left: 4px solid #1a4d6f !important;
+            border-top: 1px solid #e2e8f0 !important;
+            border-radius: 6px !important;
+            padding: 10px 12px !important;
+        }
+        /* Pestañas con deslizamiento táctil horizontal */
+        .stTabs [data-baseweb="tab-list"] {
+            padding: 4px !important;
+            gap: 4px !important;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 35px !important;
+            padding: 0 10px !important;
+            font-size: 0.78rem !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -223,30 +849,65 @@ col_s1.metric("Lotes", metricas["total_lotes"])
 col_s2.metric("Total (kg)", f"{metricas['total_cantidad']:,.1f}")
 
 col_s3, col_s4 = st.sidebar.columns(2)
-col_s3.metric("Valor Total", f"${metricas['total_valor']/1000:,.0f}k")
-col_s4.metric("En Riesgo", f"${metricas['valor_en_riesgo']/1000:,.0f}k")
+val_tot = metricas["total_valor"]
+val_rsk = metricas["valor_en_riesgo"]
+txt_tot = f"${val_tot / 1_000_000:.1f}M" if val_tot >= 1_000_000 else f"${val_tot / 1000:,.0f}k"
+txt_rsk = f"${val_rsk / 1_000_000:.1f}M" if val_rsk >= 1_000_000 else f"${val_rsk / 1000:,.0f}k"
+col_s3.metric("Valor Total", txt_tot)
+col_s4.metric("En Riesgo", txt_rsk)
 
 st.sidebar.caption("Base de datos: **PostgreSQL 18**")
 st.sidebar.caption("Lógica de Despacho: **FEFO / FIFO**")
 st.sidebar.markdown("---")
+
+manual_pdf_path = os.path.join(os.path.dirname(__file__), "Manual_de_Usuario_MamaQocha.pdf")
+if os.path.exists(manual_pdf_path):
+    with open(manual_pdf_path, "rb") as f_pdf:
+        st.sidebar.download_button(
+            label="📄 Descargar Manual (PDF)",
+            data=f_pdf.read(),
+            file_name="Manual_de_Usuario_MamaQocha.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
 st.sidebar.caption("Proyecto Académico Demo Funcional")
 
 # ==============================================================================
 # HERO HEADER BANNER
 # ==============================================================================
-modo_badge = f"📍 {nombre_local_activo}" if id_local_activo else "🌐 Modo Consolidado (Todos los locales)"
+modo_badge = f"📍 {nombre_local_activo}" if id_local_activo else "🌐 Modo Consolidado (5 Locales)"
 st.markdown(
     f"""
     <div class="hero-container">
-        <h1 class="hero-title">🦙 Mamá Qocha — Trazabilidad & Inventario</h1>
-        <div class="hero-subtitle">
-            Control de existencias multi-sucursal, alertas tempranas de caducidad, costeo de existencias y control de mermas.
+        <div class="hero-flex-top">
+            <div class="hero-brand-group">
+                <div class="hero-icon-box">🦙</div>
+                <div>
+                    <h1 class="hero-title-text">
+                        Mamá Qocha
+                        <span class="hero-version-pill">v2.4 Enterprise</span>
+                    </h1>
+                    <div class="hero-subtitle">
+                        Sistema Integral de Control de Trazabilidad, Rotación FEFO y Rescate de Insumos Críticos
+                    </div>
+                </div>
+            </div>
+            <div class="hero-status-widget">
+                <div style="font-size:0.72rem; color:#94a3b8; font-weight:700; text-transform:uppercase;">Sesión Operativa:</div>
+                <div style="font-size:0.88rem; font-weight:700; color:#38bdf8; display:flex; align-items:center; gap:6px;">
+                    {modo_badge}
+                </div>
+                <div style="font-size:0.74rem; color:#e2e8f0; margin-top:2px;">
+                    🟢 PostgreSQL 18 Online | 5 Locales
+                </div>
+            </div>
         </div>
         <div class="hero-badge-container">
-            <span class="hero-badge">🟢 PostgreSQL Conectado</span>
-            <span class="hero-badge">🏢 5 Sucursales</span>
+            <span class="hero-badge">🟢 Base de Datos Conectada</span>
+            <span class="hero-badge">🏢 5 Sucursales Interconectadas</span>
             <span class="hero-badge">📅 Fecha: {date.today().strftime('%d-%m-%Y')}</span>
-            <span class="hero-badge" style="background: rgba(255,255,255,0.3); font-weight:600;">{modo_badge}</span>
+            <span class="hero-badge">⚖️ Despacho FEFO / FIFO Automatizado</span>
         </div>
     </div>
     """,
@@ -276,42 +937,70 @@ with tab_alertas:
         "en cocina, erradicar pérdidas por caducidad y cuantificar el capital inmovilizado en riesgo."
     )
 
-    # Tarjetas financieras superiores
-    c_fin1, c_fin2 = st.columns([1.4, 1.2])
-    with c_fin1:
-        st.markdown(
-            f"""
-            <div style="background:#f8fafc; border:1px solid #cbd5e1; border-left:5px solid #0d2b45; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
-                <span style="font-size:0.8rem; color:#64748b; font-weight:600; text-transform:uppercase;">Valorización del Inventario Activo</span>
-                <div style="font-size:1.6rem; font-weight:700; color:#0d2b45;">${metricas['total_valor']:,.0f} CLP</div>
-                <span style="font-size:0.8rem; color:#475569;">Calculado según costo unitario real registrado en facturas de compra.</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c_fin2:
-        color_riesgo = "#e63946" if metricas["valor_en_riesgo"] > 0 else "#2a9d8f"
-        st.markdown(
-            f"""
-            <div style="background:#fff5f5; border:1px solid #fecaca; border-left:5px solid {color_riesgo}; border-radius:8px; padding:12px 16px; margin-bottom:12px;">
-                <span style="font-size:0.8rem; color:#991b1b; font-weight:600; text-transform:uppercase;">Capital en Riesgo de Vencimiento</span>
-                <div style="font-size:1.6rem; font-weight:700; color:{color_riesgo};">${metricas['valor_en_riesgo']:,.0f} CLP <span style="font-size:0.9rem; font-weight:500;">({metricas['pct_en_riesgo']:.1f}%)</span></div>
-                <span style="font-size:0.8rem; color:#7f1d1d;">Lotes vencidos o con menos de 7 días de vida útil.</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    # Tarjeta Ejecutiva Financiera Unificada con Barra de Riesgo
+    tot_val = metricas['total_valor'] if metricas['total_valor'] > 0 else 1.0
+    pct_venc = (metricas['valor_vencidos'] / tot_val) * 100
+    pct_crit = (metricas['valor_criticos'] / tot_val) * 100
+    pct_prev = (metricas['valor_preventivos'] / tot_val) * 100
+    pct_opt = max(0.0, 100.0 - pct_venc - pct_crit - pct_prev)
 
-    # KPI Cards estilizadas
+    st.markdown(
+        f"""
+        <div class="hero-fin-card">
+            <div class="hero-fin-grid">
+                <div class="hero-fin-col">
+                    <span class="hero-fin-title">💼 Valorización del Inventario Activo</span>
+                    <div class="hero-fin-val-blue">${metricas['total_valor']:,.0f} CLP</div>
+                    <span style="font-size:0.8rem; color:#64748b; margin-top:4px;">
+                        Calculado según costo unitario real en facturas de compra ({metricas['total_lotes']} lotes activos).
+                    </span>
+                </div>
+                <div class="hero-fin-col">
+                    <span class="hero-fin-title">⚠️ Capital en Riesgo de Vencimiento</span>
+                    <div class="hero-fin-val-red">${metricas['valor_en_riesgo']:,.0f} CLP</div>
+                    <div>
+                        <span class="hero-fin-badge-crit">
+                            🚨 <strong>{metricas['pct_en_riesgo']:.1f}%</strong> del Capital en Riesgo (≤ 7 días / vencido)
+                        </span>
+                    </div>
+                </div>
+            </div>
+            <div class="risk-bar-container">
+                <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:700; color:#475569; margin-bottom:6px;">
+                    <span>DISTRIBUCIÓN DEL CAPITAL POR NIVEL DE RIESGO:</span>
+                    <span>100% AUDITADO</span>
+                </div>
+                <div class="risk-bar">
+                    <div class="risk-bar-seg" style="width:{pct_venc:.1f}%; background:#e63946;" title="Vencidos: {pct_venc:.1f}%"></div>
+                    <div class="risk-bar-seg" style="width:{pct_crit:.1f}%; background:#f77f00;" title="Críticos: {pct_crit:.1f}%"></div>
+                    <div class="risk-bar-seg" style="width:{pct_prev:.1f}%; background:#fcbf49;" title="Preventivos: {pct_prev:.1f}%"></div>
+                    <div class="risk-bar-seg" style="width:{pct_opt:.1f}%; background:#2a9d8f;" title="Óptimos: {pct_opt:.1f}%"></div>
+                </div>
+                <div class="risk-legend-row">
+                    <span><strong style="color:#e63946;">🔴 Vencido:</strong> {pct_venc:.1f}% (${metricas['valor_vencidos']:,.0f})</span>
+                    <span><strong style="color:#f77f00;">🟠 Crítico:</strong> {pct_crit:.1f}% (${metricas['valor_criticos']:,.0f})</span>
+                    <span><strong style="color:#b38600;">🟡 Preventivo:</strong> {pct_prev:.1f}% (${metricas['valor_preventivos']:,.0f})</span>
+                    <span><strong style="color:#2a9d8f;">🟢 Óptimo:</strong> {pct_opt:.1f}% (${metricas['valor_optimos']:,.0f})</span>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Tarjetas Modulares del Semáforo
     kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
     with kpi_col1:
         st.markdown(
             f"""
-            <div class="kpi-card kpi-vencido">
-                <div class="kpi-label" style="color: #e63946;">🔴 Vencidos</div>
-                <div class="kpi-num" style="color: #e63946;">{metricas['vencidos']} <span style="font-size:0.85rem; font-weight:500;">(${metricas['valor_vencidos']:,.0f})</span></div>
-                <div class="kpi-desc">Caducados (Acción inmediata)</div>
+            <div class="semaforo-card" style="border-top: 5px solid #e63946;">
+                <div class="semaforo-header" style="color: #e63946;">🔴 Vencidos</div>
+                <div class="semaforo-num-flex">
+                    <span class="semaforo-num" style="color: #e63946;">{metricas['vencidos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                    <span class="semaforo-monto-pill" style="background:#fee2e2; color:#b91c1c;">${metricas['valor_vencidos']:,.0f}</span>
+                </div>
+                <div class="semaforo-sub">Caducados (Acción inmediata)</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -320,10 +1009,13 @@ with tab_alertas:
     with kpi_col2:
         st.markdown(
             f"""
-            <div class="kpi-card kpi-critico">
-                <div class="kpi-label" style="color: #f77f00;">🟠 Crítico (≤ 7 d)</div>
-                <div class="kpi-num" style="color: #f77f00;">{metricas['criticos']} <span style="font-size:0.85rem; font-weight:500;">(${metricas['valor_criticos']:,.0f})</span></div>
-                <div class="kpi-desc">Prioridad máxima en cocina</div>
+            <div class="semaforo-card" style="border-top: 5px solid #f77f00;">
+                <div class="semaforo-header" style="color: #c2410c;">🟠 Crítico (≤ 7 d)</div>
+                <div class="semaforo-num-flex">
+                    <span class="semaforo-num" style="color: #f77f00;">{metricas['criticos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                    <span class="semaforo-monto-pill" style="background:#ffedd5; color:#c2410c;">${metricas['valor_criticos']:,.0f}</span>
+                </div>
+                <div class="semaforo-sub">Prioridad máxima en cocina</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -332,10 +1024,13 @@ with tab_alertas:
     with kpi_col3:
         st.markdown(
             f"""
-            <div class="kpi-card kpi-preventivo">
-                <div class="kpi-label" style="color: #b38600;">🟡 Preventivo (8-30 d)</div>
-                <div class="kpi-num" style="color: #b38600;">{metricas['preventivos']} <span style="font-size:0.85rem; font-weight:500;">(${metricas['valor_preventivos']:,.0f})</span></div>
-                <div class="kpi-desc">En observación y rotación regular</div>
+            <div class="semaforo-card" style="border-top: 5px solid #e0a912;">
+                <div class="semaforo-header" style="color: #a16207;">🟡 Preventivo (8-30 d)</div>
+                <div class="semaforo-num-flex">
+                    <span class="semaforo-num" style="color: #d97706;">{metricas['preventivos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                    <span class="semaforo-monto-pill" style="background:#fef3c7; color:#92400e;">${metricas['valor_preventivos']:,.0f}</span>
+                </div>
+                <div class="semaforo-sub">En observación y rotación regular</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -344,10 +1039,13 @@ with tab_alertas:
     with kpi_col4:
         st.markdown(
             f"""
-            <div class="kpi-card kpi-optimo">
-                <div class="kpi-label" style="color: #2a9d8f;">🟢 Óptimo (> 30 d)</div>
-                <div class="kpi-num" style="color: #2a9d8f;">{metricas['optimos']} <span style="font-size:0.85rem; font-weight:500;">(${metricas['valor_optimos']:,.0f})</span></div>
-                <div class="kpi-desc">Vida útil segura y holgada</div>
+            <div class="semaforo-card" style="border-top: 5px solid #2a9d8f;">
+                <div class="semaforo-header" style="color: #15803d;">🟢 Óptimo (> 30 d)</div>
+                <div class="semaforo-num-flex">
+                    <span class="semaforo-num" style="color: #2a9d8f;">{metricas['optimos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                    <span class="semaforo-monto-pill" style="background:#dcfce7; color:#15803d;">${metricas['valor_optimos']:,.0f}</span>
+                </div>
+                <div class="semaforo-sub">Vida útil segura y holgada</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -356,7 +1054,7 @@ with tab_alertas:
     inventario_df = db.load_inventario_alertas(id_local=id_local_activo)
 
     # --------------------------------------------------------------------------
-    # NUEVA FILA: KPIS DE GESTIÓN Y CONTROL EJECUTIVO
+    # NUEVA FILA: KPIS DE GESTIÓN Y CONTROL EJECUTIVO (ESTILIZADOS)
     # --------------------------------------------------------------------------
     total_val_inv = float(inventario_df["valor_inventario"].sum()) if not inventario_df.empty else 0.0
     potencial_facturacion = total_val_inv * 3.2
@@ -372,33 +1070,81 @@ with tab_alertas:
     porciones_totales_estimadas = int(total_kg_stock / 0.220) if total_kg_stock > 0 else 0
 
     col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
+
     with col_ex1:
-        st.metric(
-            "💵 Potencial Facturación Carta",
-            f"${potencial_facturacion:,.0f} CLP",
-            "Factor 3.2× Costo (Gastro)",
-            help="Venta estimada si el 100% del stock se transforma en platos de la carta.",
+        st.markdown(
+            f"""
+            <div class="op-kpi-card">
+                <div class="op-kpi-head">
+                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#ffffff;">💵</div>
+                    <span class="op-kpi-title">Potencial Facturación Carta</span>
+                </div>
+                <div class="op-kpi-val">${potencial_facturacion:,.0f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">CLP</span></div>
+                <div>
+                    <span class="op-kpi-tag" style="background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">
+                        ↑ Factor 3.2× Costo (Gastro)
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
+
     with col_ex2:
-        st.metric(
-            "🛡️ Inocuidad HACCP (≤ 4°C)",
-            f"{pct_haccp:.1f}%",
-            f"{lotes_haccp_ok}/{total_lotes_inv} lotes seguros",
-            help="Porcentaje de partidas que ingresaron cumpliendo la cadena de frío reglamentaria.",
+        st.markdown(
+            f"""
+            <div class="op-kpi-card">
+                <div class="op-kpi-head">
+                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #0284c7 0%, #0369a1 100%); color:#ffffff;">🛡️</div>
+                    <span class="op-kpi-title">Inocuidad HACCP (≤ 4°C)</span>
+                </div>
+                <div class="op-kpi-val">{pct_haccp:.1f}%</div>
+                <div>
+                    <span class="op-kpi-tag" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd;">
+                        ↑ {lotes_haccp_ok}/{total_lotes_inv} lotes seguros
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
+
     with col_ex3:
-        st.metric(
-            "⏳ Vida Útil Promedio Ponderada",
-            f"{dias_vida_pond:.1f} días",
-            "Ponderado por capital",
-            help="Días promedio de vida útil remanente ponderados por el valor en dinero de cada lote.",
+        st.markdown(
+            f"""
+            <div class="op-kpi-card">
+                <div class="op-kpi-head">
+                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color:#ffffff;">⏳</div>
+                    <span class="op-kpi-title">Vida Útil Ponderada</span>
+                </div>
+                <div class="op-kpi-val">{dias_vida_pond:.1f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">días</span></div>
+                <div>
+                    <span class="op-kpi-tag" style="background:#fefce8; color:#a16207; border:1px solid #fef08a;">
+                        Ponderado por capital
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
+
     with col_ex4:
-        st.metric(
-            "🍽️ Capacidad Total de Comandas",
-            f"{porciones_totales_estimadas:,} platos",
-            f"{total_kg_stock:.1f} kg activos",
-            help="Cantidad estimada de platos individuales elaborables con el stock de carnes y mariscos.",
+        st.markdown(
+            f"""
+            <div class="op-kpi-card">
+                <div class="op-kpi-head">
+                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color:#ffffff;">🍽️</div>
+                    <span class="op-kpi-title">Capacidad de Comandas</span>
+                </div>
+                <div class="op-kpi-val">{porciones_totales_estimadas:,} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">platos</span></div>
+                <div>
+                    <span class="op-kpi-tag" style="background:#eef2ff; color:#4338ca; border:1px solid #c7d2fe;">
+                        ↑ {total_kg_stock:.1f} kg activos
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     if inventario_df.empty:
@@ -487,27 +1233,74 @@ with tab_alertas:
                 cols_top = st.columns(len(top_platos))
                 for idx, (_, p_fila) in enumerate(top_platos.iterrows()):
                     with cols_top[idx]:
-                        with st.container(border=True):
-                            st.markdown(f"##### 🍽️ {p_fila['receta']}")
-                            st.caption(f"Categoría: **{p_fila['categoria']}** | Carta: **${p_fila['precio_carta']:,.0f}**")
+                        receta = p_fila["receta"]
+                        receta_lower = receta.lower()
+                        if any(k in receta_lower for k in ["lomo", "carne", "res"]):
+                            icono = "🥩"
+                            color_grad = "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)"
+                        elif any(k in receta_lower for k in ["gallina", "pollo", "ave"]):
+                            icono = "🍗"
+                            color_grad = "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)"
+                        elif any(k in receta_lower for k in ["ceviche", "pescado", "reineta", "salmon", "marisco", "pulpo"]):
+                            icono = "🐟"
+                            color_grad = "linear-gradient(135deg, #06b6d4 0%, #0284c7 100%)"
+                        elif any(k in receta_lower for k in ["arroz", "chaufa"]):
+                            icono = "🍚"
+                            color_grad = "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                        else:
+                            icono = "🍽️"
+                            color_grad = "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
 
-                            st.metric("Porciones Sugeridas", f"{p_fila['porciones']} platos", f"+${p_fila['venta_recuperable']:,.0f} CLP")
+                        dias = int(p_fila["dias_restantes"])
+                        if dias <= 0:
+                            badge_html = '<span class="recipe-urg-critico">🔴 Vence Hoy</span>'
+                            color_borde_top = "#ef4444"
+                        elif dias <= 2:
+                            badge_html = f'<span class="recipe-urg-critico">🔴 Urgente ({dias}d)</span>'
+                            color_borde_top = "#ef4444"
+                        else:
+                            badge_html = f'<span class="recipe-urg-alta">🟠 Prioridad ({dias}d)</span>'
+                            color_borde_top = "#f59e0b"
 
-                            badge_dias = "🔴 Urgente" if p_fila["dias_restantes"] <= 3 else "🟠 Prioridad"
-                            st.markdown(
-                                f"""
-                                <div style="font-size:0.82rem; background:#f8fafc; padding:8px; border-radius:6px; border:1px solid #e2e8f0;">
-                                    • <strong>Insumo en riesgo:</strong> {p_fila['kg_en_riesgo']:.1f} kg {p_fila['insumo_critico']}<br>
-                                    • <strong>Vencimiento:</strong> {p_fila['dias_restantes']} días restantes ({badge_dias})<br>
-                                    • <strong>Locales:</strong> {p_fila['locales']}
+                        card_html = f"""
+                        <div class="recipe-card" style="border-top: 5px solid {color_borde_top};">
+                            <div class="recipe-card-top">
+                                <span class="recipe-cat-badge">{p_fila['categoria']}</span>
+                                {badge_html}
+                            </div>
+                            <div class="recipe-header-flex">
+                                <div class="recipe-avatar" style="background: {color_grad};">{icono}</div>
+                                <div style="flex: 1; min-width: 0;">
+                                    <div class="recipe-title" title="{receta}">{receta}</div>
+                                    <div class="recipe-carta">Carta: <strong>${p_fila['precio_carta']:,.0f}</strong></div>
                                 </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-                            st.markdown(
-                                "<div style='margin-top:6px; font-size:0.78rem; color:#0369a1; font-weight:600;'>💡 Sugerencia: Ofrecer como especial del chef en turno almuerzo o promo 2×1.</div>",
-                                unsafe_allow_html=True,
-                            )
+                            </div>
+                            <div class="recipe-kpi-banner">
+                                <div>
+                                    <div class="recipe-kpi-num">{int(p_fila['porciones'])} <span style="font-size:0.85rem; font-weight:600;">platos</span></div>
+                                    <div class="recipe-kpi-sub">Porciones Sugeridas</div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div class="recipe-kpi-gain">+${p_fila['venta_recuperable']:,.0f}</div>
+                                    <div class="recipe-kpi-sub">Venta Recuperable</div>
+                                </div>
+                            </div>
+                            <div class="recipe-meta-list">
+                                <div class="recipe-meta-item">
+                                    <span style="color:#64748b;">⚠️ Insumo Crítico:</span>
+                                    <strong>{p_fila['kg_en_riesgo']:.1f} kg {p_fila['insumo_critico']}</strong>
+                                </div>
+                                <div class="recipe-meta-item">
+                                    <span style="color:#64748b;">📍 Sucursales:</span>
+                                    <span style="font-weight:600; font-size:0.76rem;">{p_fila['locales']}</span>
+                                </div>
+                            </div>
+                            <div class="recipe-footer-callout">
+                                💡 <strong>Sugerencia Chef:</strong> Ofrecer como especial de turno o promo 2×1.
+                            </div>
+                        </div>
+                        """
+                        st.markdown(card_html, unsafe_allow_html=True)
 
                 with st.expander("🔍 Ver todas las recetas recomendadas para rescate de stock"):
                     st.dataframe(
@@ -539,35 +1332,61 @@ with tab_alertas:
                 resumen_alertas = inventario_df["estado_alerta"].value_counts().reset_index()
                 resumen_alertas.columns = ["Estado", "Cantidad de Lotes"]
 
-                if HAS_PLOTLY:
-                    colores_map = {
-                        "🔴 Vencido": "#e63946",
-                        "🟠 Crítico (≤ 7 días)": "#f77f00",
-                        "🟡 Preventivo (8-30 días)": "#fcbf49",
-                        "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                colores_map = {
+                    "🔴 Vencido": "#e63946",
+                    "🟠 Crítico (≤ 7 días)": "#f77f00",
+                    "🟡 Preventivo (8-30 días)": "#fcbf49",
+                    "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                }
+
+                donut_data = [
+                    {
+                        "name": str(row["Estado"]),
+                        "value": int(row["Cantidad de Lotes"]),
+                        "itemStyle": {"color": colores_map.get(str(row["Estado"]), "#8da9c4")},
                     }
-                    fig_donut = px.pie(
-                        resumen_alertas,
-                        names="Estado",
-                        values="Cantidad de Lotes",
-                        hole=0.55,
-                        color="Estado",
-                        color_discrete_map=colores_map,
-                    )
-                    fig_donut.update_traces(
-                        textposition="inside",
-                        textinfo="percent+value",
-                        marker=dict(line=dict(color="#ffffff", width=2)),
-                    )
-                    fig_donut.update_layout(
-                        margin=dict(t=10, b=10, l=10, r=10),
-                        showlegend=True,
-                        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
-                        height=270,
-                    )
-                    st.plotly_chart(fig_donut, use_container_width=True)
-                else:
-                    st.dataframe(resumen_alertas, hide_index=True, use_container_width=True)
+                    for _, row in resumen_alertas.iterrows()
+                ]
+
+                option_donut = {
+                    "tooltip": {
+                        "trigger": "item",
+                        "formatter": "{b}<br/><b>{c} lotes</b> ({d}%)",
+                    },
+                    "legend": {
+                        "bottom": "0%",
+                        "left": "center",
+                        "icon": "circle",
+                        "textStyle": {"fontSize": 11, "color": "#475569"},
+                    },
+                    "series": [
+                        {
+                            "name": "Semáforo",
+                            "type": "pie",
+                            "radius": ["48%", "72%"],
+                            "center": ["50%", "45%"],
+                            "avoidLabelOverlap": False,
+                            "itemStyle": {
+                                "borderRadius": 6,
+                                "borderColor": "#ffffff",
+                                "borderWidth": 2,
+                            },
+                            "label": {"show": False},
+                            "emphasis": {
+                                "scale": True,
+                                "scaleSize": 5,
+                                "label": {
+                                    "show": True,
+                                    "fontSize": 14,
+                                    "fontWeight": "bold",
+                                    "formatter": "{d}%",
+                                },
+                            },
+                            "data": donut_data,
+                        }
+                    ],
+                }
+                render_echarts(option_donut, height=270, key="donut_semaforo")
 
         with col_g2:
             with st.container(border=True):
@@ -579,24 +1398,61 @@ with tab_alertas:
                     .sort_values(by="cantidad", ascending=True)
                 )
 
-                if HAS_PLOTLY:
-                    fig_bar = px.bar(
-                        stock_producto,
-                        x="cantidad",
-                        y="producto",
-                        orientation="h",
-                        labels={"cantidad": "Kilos (kg)", "producto": "Producto"},
-                        color="cantidad",
-                        color_continuous_scale=["#8da9c4", "#0d2b45"],
-                    )
-                    fig_bar.update_layout(
-                        margin=dict(t=10, b=10, l=10, r=10),
-                        coloraxis_showscale=False,
-                        height=270,
-                    )
-                    st.plotly_chart(fig_bar, use_container_width=True)
-                else:
-                    st.bar_chart(stock_producto.set_index("producto"))
+                option_bar = {
+                    "tooltip": {
+                        "trigger": "axis",
+                        "axisPointer": {"type": "shadow"},
+                        "formatter": "{b}: <b>{c} kg</b>",
+                    },
+                    "grid": {
+                        "left": "3%",
+                        "right": "12%",
+                        "bottom": "3%",
+                        "top": "5%",
+                        "containLabel": True,
+                    },
+                    "xAxis": {
+                        "type": "value",
+                        "axisLabel": {"formatter": "{value} kg"},
+                        "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                    },
+                    "yAxis": {
+                        "type": "category",
+                        "data": [str(p) for p in stock_producto["producto"].tolist()],
+                        "axisLine": {"lineStyle": {"color": "#94a3b8"}},
+                        "axisLabel": {"color": "#334155", "fontSize": 11},
+                    },
+                    "series": [
+                        {
+                            "name": "Stock Total",
+                            "type": "bar",
+                            "data": [round(float(c), 1) for c in stock_producto["cantidad"].tolist()],
+                            "itemStyle": {
+                                "borderRadius": [0, 6, 6, 0],
+                                "color": {
+                                    "type": "linear",
+                                    "x": 0,
+                                    "y": 0,
+                                    "x2": 1,
+                                    "y2": 0,
+                                    "colorStops": [
+                                        {"offset": 0, "color": "#0d2b45"},
+                                        {"offset": 1, "color": "#00b4d8"},
+                                    ],
+                                },
+                            },
+                            "label": {
+                                "show": True,
+                                "position": "right",
+                                "formatter": "{c} kg",
+                                "color": "#0f172a",
+                                "fontWeight": "bold",
+                                "fontSize": 11,
+                            },
+                        }
+                    ],
+                }
+                render_echarts(option_bar, height=270, key="bar_stock")
 
         # Matriz de Dispersión Riesgo vs Capital
         with st.container(border=True):
@@ -669,39 +1525,76 @@ with tab_alertas:
         with col_rv1:
             with st.container(border=True):
                 st.markdown("##### 📊 Valor de Inventario por Local según Nivel de Riesgo")
-                if HAS_PLOTLY:
-                    df_chart_loc = df_todas_sucursales.groupby(
-                        ["local", "estado_alerta", "severidad_alerta"]
-                    )["valor_inventario"].sum().reset_index()
-                    df_chart_loc = df_chart_loc.sort_values(by="severidad_alerta")
+                df_chart_loc = (
+                    df_todas_sucursales.groupby(["local", "estado_alerta", "severidad_alerta"])[
+                        "valor_inventario"
+                    ]
+                    .sum()
+                    .reset_index()
+                )
+                df_chart_loc = df_chart_loc.sort_values(by="severidad_alerta")
 
-                    fig_riesgo_local = px.bar(
-                        df_chart_loc,
-                        x="local",
-                        y="valor_inventario",
-                        color="estado_alerta",
-                        barmode="stack",
-                        color_discrete_map={
-                            "🔴 Vencido": "#e63946",
-                            "🟠 Crítico (≤ 7 días)": "#f77f00",
-                            "🟡 Preventivo (8-30 días)": "#fcbf49",
-                            "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                locales_unicos = df_todas_sucursales["local"].unique().tolist()
+                estados_orden = [
+                    "🔴 Vencido",
+                    "🟠 Crítico (≤ 7 días)",
+                    "🟡 Preventivo (8-30 días)",
+                    "🟢 Óptimo (> 30 días)",
+                ]
+
+                colores_riesgo = {
+                    "🔴 Vencido": "#e63946",
+                    "🟠 Crítico (≤ 7 días)": "#f77f00",
+                    "🟡 Preventivo (8-30 días)": "#fcbf49",
+                    "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                }
+
+                series_list = []
+                for est in estados_orden:
+                    sub = df_chart_loc[df_chart_loc["estado_alerta"] == est]
+                    mapa_monto = dict(zip(sub["local"], sub["valor_inventario"]))
+                    data_vals = [float(mapa_monto.get(loc, 0)) for loc in locales_unicos]
+                    series_list.append({
+                        "name": est,
+                        "type": "bar",
+                        "stack": "riesgo",
+                        "data": data_vals,
+                        "itemStyle": {"color": colores_riesgo.get(est, "#94a3b8")},
+                    })
+
+                option_sucursales = {
+                    "tooltip": {
+                        "trigger": "axis",
+                        "axisPointer": {"type": "shadow"},
+                    },
+                    "legend": {
+                        "top": "0%",
+                        "left": "center",
+                        "icon": "circle",
+                        "textStyle": {"fontSize": 11, "color": "#475569"},
+                    },
+                    "grid": {
+                        "left": "3%",
+                        "right": "4%",
+                        "bottom": "5%",
+                        "top": "16%",
+                        "containLabel": True,
+                    },
+                    "xAxis": {
+                        "type": "category",
+                        "data": locales_unicos,
+                        "axisLabel": {"interval": 0, "rotate": 10, "color": "#334155", "fontSize": 11},
+                    },
+                    "yAxis": {
+                        "type": "value",
+                        "axisLabel": {
+                            "formatter": "${value}",
                         },
-                        labels={
-                            "local": "Sucursal",
-                            "valor_inventario": "Monto en Stock ($CLP)",
-                            "estado_alerta": "Estado",
-                        },
-                    )
-                    fig_riesgo_local.update_layout(
-                        margin=dict(t=20, b=10, l=10, r=10),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        height=290,
-                        yaxis=dict(tickformat="$,.0f"),
-                    )
-                    st.plotly_chart(fig_riesgo_local, use_container_width=True)
-                else:
-                    st.dataframe(df_todas_sucursales.groupby("local")["valor_inventario"].sum())
+                        "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                    },
+                    "series": series_list,
+                }
+                render_echarts(option_sucursales, height=290, key="sucursales_riesgo")
 
         with col_rv2:
             with st.container(border=True):
