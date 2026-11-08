@@ -2353,9 +2353,17 @@ with tab_traslados:
                 st.text_input("Local de Origen (fijado por sesión):", value=nombre_local_activo, disabled=True)
             else:
                 opciones_locales_traslado = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
+                # Permitir sobreescribir origen si se pinchó un flete de retorno
+                default_origen = st.session_state.pop("traslado_intercambiar_origen", None)
+                if default_origen and default_origen in opciones_locales_traslado:
+                    idx_orig = list(opciones_locales_traslado.keys()).index(default_origen)
+                else:
+                    idx_orig = 0
+
                 local_traslado_origen_id = st.selectbox(
-                    "Local de Origen:*",
+                    "Local de Origen (Emisor):*",
                     options=list(opciones_locales_traslado.keys()),
+                    index=idx_orig,
                     format_func=lambda k: opciones_locales_traslado[k],
                     key="sel_local_traslado_origen",
                 )
@@ -2369,14 +2377,176 @@ with tab_traslados:
         with col_t_dest:
             locales_destino_posibles = locales_df[locales_df["id_local"] != int(local_traslado_origen_id)]
             opciones_destino = {row["id_local"]: row["nombre"] for _, row in locales_destino_posibles.iterrows()}
+            default_destino = st.session_state.pop("traslado_intercambiar_destino", None)
+            if default_destino and default_destino in opciones_destino:
+                idx_dest = list(opciones_destino.keys()).index(default_destino)
+            else:
+                idx_dest = 0
+
             local_traslado_destino_id = st.selectbox(
-                "Local de Destino:*",
+                "Local de Destino (Receptor):*",
                 options=list(opciones_destino.keys()),
+                index=idx_dest,
                 format_func=lambda k: opciones_destino[k],
                 key="sel_local_traslado_destino",
             )
 
+    # Cargar datos de riesgo FEFO para ambos locales (Ida y Retorno)
     stock_disp_traslado = db.load_stock_disponible_local(int(local_traslado_origen_id))
+    df_top_origen = db.load_top_riesgo_traslado(int(local_traslado_origen_id), limit=7)
+    df_top_destino = db.load_top_riesgo_traslado(int(local_traslado_destino_id), limit=7)
+
+    # ==========================================================================
+    # TABLAS DE TRASLADO: TOP 7 CRÍTICOS + OPTIMIZACIÓN DE FLETE DE RETORNO
+    # ==========================================================================
+    st.markdown("#### ⚖️ Tablas de Decisión Logística y Optimización de Flete (Backhaul)")
+    st.caption(
+        "Monitoreo bilateral de riesgo FEFO. Pincha un producto para transferirlo o aprovecha "
+        "el flete de regreso para rescatar insumos críticos del local destino."
+    )
+
+    col_panel_ida, col_panel_vuelta = st.columns(2)
+
+    # PANEL 1: FLETE DE IDA (ORIGEN -> DESTINO)
+    with col_panel_ida:
+        with st.container(border=True):
+            nombre_orig_simple = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
+            nombre_dest_simple = opciones_destino.get(local_traslado_destino_id, "Destino")
+            
+            val_riesgo_orig = df_top_origen["valor_en_riesgo"].sum() if not df_top_origen.empty else 0
+            kg_riesgo_orig = df_top_origen["stock_disponible"].sum() if not df_top_origen.empty else 0
+
+            st.markdown(
+                f"""
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <div>
+                        <strong style="color:#e63946; font-size:1.05rem;">🔴 Flete de Ida: Top 7 en Riesgo</strong><br>
+                        <span style="font-size:0.8rem; color:#64748b;">Desde: <b>{nombre_orig_simple}</b> ➡️ Hacia: <b>{nombre_dest_simple}</b></span>
+                    </div>
+                    <div style="text-align:right;">
+                        <span style="font-size:0.75rem; color:#64748b;">Capital en Riesgo:</span><br>
+                        <strong style="color:#e63946; font-size:1rem;">${val_riesgo_orig:,.0f} CLP</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if df_top_origen.empty:
+                st.info("No hay insumos disponibles en el local de origen.")
+            else:
+                # Tabla interactiva con dataframe
+                st.dataframe(
+                    df_top_origen[[
+                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
+                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=240,
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
+                        "producto": "Materia Prima",
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
+                        "estado_alerta": "Semáforo",
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.2f kg"),
+                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Riesgo", format="$%d"),
+                        "codigo_lote_proveedor": "Ref.",
+                    }
+                )
+
+                # Selector rápido / Pinchar y Trasladar
+                lotes_ida_dict = {
+                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
+                    for _, r in df_top_origen.iterrows()
+                }
+                
+                col_pin_sel, col_pin_btn = st.columns([3, 1])
+                with col_pin_sel:
+                    lote_pin_ida = st.selectbox(
+                        "Pinchar partida crítica para flete de ida:*",
+                        options=list(lotes_ida_dict.keys()),
+                        format_func=lambda k: lotes_ida_dict[k],
+                        key="sel_pin_ida",
+                        label_visibility="collapsed",
+                    )
+                with col_pin_btn:
+                    if st.button("📌 Pinchar", key="btn_pin_ida", use_container_width=True):
+                        st.session_state["lote_traslado_seleccionado"] = lote_pin_ida
+                        st.toast(f"✅ Partida Lote #{lote_pin_ida} fijada para despacho.", icon="📦")
+                        st.rerun()
+
+    # PANEL 2: OPTIMIZACIÓN DE RETORNO / BACKHAUL (DESTINO -> ORIGEN)
+    with col_panel_vuelta:
+        with st.container(border=True):
+            val_riesgo_dest = df_top_destino["valor_en_riesgo"].sum() if not df_top_destino.empty else 0
+            kg_riesgo_dest = df_top_destino["stock_disponible"].sum() if not df_top_destino.empty else 0
+
+            st.markdown(
+                f"""
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <div>
+                        <strong style="color:#0284c7; font-size:1.05rem;">🔄 Retorno Oportuno: Top 7 en Destino</strong><br>
+                        <span style="font-size:0.8rem; color:#64748b;">Aprovechar vuelta desde: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b></span>
+                    </div>
+                    <div style="text-align:right;">
+                        <span style="font-size:0.75rem; color:#64748b;">Rescatable en Retorno:</span><br>
+                        <strong style="color:#0284c7; font-size:1rem;">${val_riesgo_dest:,.0f} CLP</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if df_top_destino.empty:
+                st.info("El local destino no registra partidas críticas para flete de retorno.")
+            else:
+                st.dataframe(
+                    df_top_destino[[
+                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
+                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=240,
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
+                        "producto": "Materia Prima",
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
+                        "estado_alerta": "Semáforo",
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.2f kg"),
+                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Riesgo", format="$%d"),
+                        "codigo_lote_proveedor": "Ref.",
+                    }
+                )
+
+                lotes_vuelta_dict = {
+                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
+                    for _, r in df_top_destino.iterrows()
+                }
+
+                col_ret_sel, col_ret_btn = st.columns([2.5, 1.5])
+                with col_ret_sel:
+                    lote_ret_sel = st.selectbox(
+                        "Elegir partida a rescatar en retorno:*",
+                        options=list(lotes_vuelta_dict.keys()),
+                        format_func=lambda k: lotes_vuelta_dict[k],
+                        key="sel_ret_dest",
+                        label_visibility="collapsed",
+                    )
+                with col_ret_btn:
+                    if st.button("🔄 Traer en Retorno", key="btn_invertir_flete", use_container_width=True, help="Invierte la ruta y fija esta partida para traerla de vuelta."):
+                        st.session_state["traslado_intercambiar_origen"] = int(local_traslado_destino_id)
+                        st.session_state["traslado_intercambiar_destino"] = int(local_traslado_origen_id)
+                        st.session_state["lote_traslado_seleccionado"] = lote_ret_sel
+                        st.toast(f"🔄 Ruta invertida: cargando Lote #{lote_ret_sel} para flete de retorno.", icon="🚚")
+                        st.rerun()
+
+    # ==========================================================================
+    # FORMULARIO / MANIFIESTO DE DESPACHO
+    # ==========================================================================
+    st.markdown("---")
+    st.markdown("#### 📦 Guía de Despacho y Registro de Traslado")
 
     if stock_disp_traslado.empty:
         st.warning("El local de origen seleccionado no cuenta con insumos disponibles para traspasar.")
@@ -2386,17 +2556,27 @@ with tab_traslados:
             for _, row in stock_disp_traslado.iterrows()
         }
 
+        # Comprobar si hay un lote preseleccionado desde las tablas de riesgo
+        lote_preseleccionado = st.session_state.get("lote_traslado_seleccionado")
+        if lote_preseleccionado not in dict_lotes_traslado:
+            lote_preseleccionado = list(dict_lotes_traslado.keys())[0]
+
+        idx_default_lote = list(dict_lotes_traslado.keys()).index(lote_preseleccionado)
+
         with st.container(border=True):
             with st.form("form_traslado_lotes", clear_on_submit=False):
                 lote_traslado_sel = st.selectbox(
                     "Lote a transferir hacia la otra sucursal:*",
                     options=list(dict_lotes_traslado.keys()),
+                    index=idx_default_lote,
                     format_func=lambda k: dict_lotes_traslado[k],
+                    help="Auto-seleccionado según el insumo pinchado en las tablas de riesgo FEFO superiores.",
                 )
 
                 fila_traslado_sel = stock_disp_traslado[stock_disp_traslado["id_lote"] == lote_traslado_sel].iloc[0]
                 max_traslado = float(fila_traslado_sel["stock_disponible"])
                 unidad_traslado = fila_traslado_sel["unidad_medida"]
+                costo_unit_lote = float(fila_traslado_sel["costo_unitario"])
 
                 col_sub_t1, col_sub_t2 = st.columns(2)
                 with col_sub_t1:
@@ -2404,30 +2584,42 @@ with tab_traslados:
                         f"Cantidad a trasladar ({unidad_traslado}):*",
                         min_value=0.001,
                         max_value=max_traslado,
-                        value=min(5.0, max_traslado),
+                        value=float(max_traslado),
                         step=0.5,
                         format="%.3f",
-                        help=f"Stock máximo disponible en origen: {max_traslado:.3f} {unidad_traslado}",
+                        help=f"Stock máximo disponible en origen: {max_traslado:.3f} {unidad_traslado}. Pre-cargado al 100% para despejar riesgo de caducidad.",
                     )
-                    ref_traslado = st.text_input("N° de Guía o Referencia de Traslado:", placeholder="Ej. GT-2026-0089")
+                    ref_traslado = st.text_input(
+                        "N° de Guía o Referencia de Traslado:*",
+                        value=f"GT-{local_traslado_origen_id}{local_traslado_destino_id}-{fila_traslado_sel['codigo_lote_proveedor'][-6:] if len(fila_traslado_sel['codigo_lote_proveedor']) >= 6 else '001'}",
+                        placeholder="Ej. GT-2026-0089",
+                    )
 
                 with col_sub_t2:
+                    valor_transferido_clp = cant_traslado * costo_unit_lote
+                    dias_venc = int(fila_traslado_sel['dias_para_vencer'])
+                    color_dias = "#e63946" if dias_venc <= 2 else ("#f77f00" if dias_venc <= 5 else "#2a9d8f")
+
                     st.markdown(
                         f"""
                         <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px;">
-                            <strong>Detalle del Despacho:</strong><br>
-                            • <strong>Insumo:</strong> {fila_traslado_sel['producto']}<br>
-                            • <strong>Lote Proveedor:</strong> <code>{fila_traslado_sel['codigo_lote_proveedor']}</code><br>
-                            • <strong>Vencimiento:</strong> {fila_traslado_sel['fecha_vencimiento']}<br>
-                            • <strong>Disponible actual:</strong> <code>{max_traslado:.3f} {unidad_traslado}</code>
+                            <strong>Detalle y Diagnóstico del Despacho:</strong><br>
+                            • <strong>Insumo:</strong> {fila_traslado_sel['producto']} (Lote: <code>{fila_traslado_sel['codigo_lote_proveedor']}</code>)<br>
+                            • <strong>Caducidad FEFO:</strong> {fila_traslado_sel['fecha_vencimiento']} (<strong style="color:{color_dias};">{dias_venc} días restantes</strong>)<br>
+                            • <strong>Capital Rescatado:</strong> <code>${valor_transferido_clp:,.0f} CLP</code> (${costo_unit_lote:,.0f} /{unidad_traslado})<br>
+                            • <strong>Stock Disponible Actual:</strong> <code>{max_traslado:.3f} {unidad_traslado}</code>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
-                    obs_traslado = st.text_area("Condiciones de transporte:", placeholder="Cadena de frío en hielera sellada...", height=60)
+                    obs_traslado = st.text_area(
+                        "Protocolo y Condiciones de Transporte (Inocuidad):*",
+                        value="Cadena de frío verificada con termómetro digital en hielera sellada. Traslado directo.",
+                        height=55,
+                    )
 
                 st.markdown("---")
-                btn_traslado = st.form_submit_button("🚚 Ejecutar Traslado entre Sucursales", type="primary", use_container_width=True)
+                btn_traslado = st.form_submit_button("🚚 Confirmar y Ejecutar Traslado entre Sucursales", type="primary", use_container_width=True)
 
         if btn_traslado:
             try:
@@ -2591,13 +2783,18 @@ with tab_mermas:
                 col_m_f1, col_m_f2 = st.columns(2)
 
                 with col_m_f1:
-                    motivos_merma = [
-                        "❄️ Pérdida de cadena de frío (> 5°C - Riesgo Sanitario)",
-                        "🔴 Vencimiento cumplido (Fecha expirada)",
-                        "⚠️ Deterioro físico / Contaminación cruzada",
-                        "🔪 Merma excesiva en preparación o porcionamiento",
-                    ]
-                    motivo_sel = st.selectbox("Causa / Motivo de la Merma:*", motivos_merma)
+                    iconos_causa = {
+                        "Ruptura de cadena de frío en cocina": "❄️ Ruptura de cadena de frío en cocina",
+                        "Vencimiento de fecha límite FEFO": "🔴 Vencimiento de fecha límite FEFO",
+                        "Deterioro organoléptico en recepción": "⚠️ Deterioro organoléptico en recepción",
+                        "Manipulación / Error de porcionado": "🔪 Manipulación / Error de porcionado",
+                    }
+                    motivo_sel = st.selectbox(
+                        "Tipificación Obligatoria de Causa Raíz:*",
+                        options=list(db.CAUSAS_RAIZ_MERMA),
+                        format_func=lambda k: iconos_causa.get(k, k),
+                        help="Protocolo estandarizado de clasificación de pérdidas para auditoría e informes (Etapa 2 [19, 24])."
+                    )
 
                     cant_merma = st.number_input(
                         f"Cantidad a dar de baja ({unidad_merma}):*",
@@ -2623,34 +2820,147 @@ with tab_mermas:
                         """,
                         unsafe_allow_html=True,
                     )
-                    obs_merma = st.text_area("Observaciones y causa raíz (Auditoría sanitaria):", placeholder="Ej. Falla de termostato en cámara 2 durante la noche...", height=60)
+                    obs_merma = st.text_area(
+                        "Justificación sanitaria / Causa Raíz detallada:*",
+                        placeholder="Ej. Registro de temperatura superó los 7°C por corte eléctrico de 3 horas...",
+                        height=60,
+                        help="Obligatorio para mantener el expediente forense de control de pérdidas."
+                    )
 
                 st.markdown("---")
                 btn_declarar_merma = st.form_submit_button("🗑️ Confirmar y Procesar Baja por Merma", type="primary", use_container_width=True)
 
             if btn_declarar_merma:
-                try:
-                    res_m = db.registrar_merma(
-                        id_local=int(local_merma_id),
-                        id_lote=int(lote_merma_sel),
-                        cantidad=float(cant_merma),
-                        motivo=motivo_sel,
-                        observaciones=obs_merma.strip() or None,
-                    )
-                    st.session_state["voucher_merma"] = {
-                        "id_movimiento": res_m["id_movimiento"],
-                        "producto": res_m["producto"],
-                        "lote": res_m["codigo_lote_proveedor"],
-                        "motivo": res_m["motivo"],
-                        "cantidad": res_m["cantidad"],
-                        "unidad": res_m["unidad_medida"],
-                        "costo_unitario": res_m["costo_unitario"],
-                        "costo_total_perdida": res_m["costo_total_perdida"],
-                        "nuevo_stock": res_m["nuevo_stock"],
+                if not obs_merma.strip():
+                    st.warning("⚠️ Debe ingresar una justificación o detalle de causa raíz antes de confirmar el acta.")
+                else:
+                    try:
+                        res_m = db.registrar_merma(
+                            id_local=int(local_merma_id),
+                            id_lote=int(lote_merma_sel),
+                            cantidad=float(cant_merma),
+                            motivo=motivo_sel,
+                            observaciones=obs_merma.strip(),
+                        )
+                        st.session_state["voucher_merma"] = {
+                            "id_movimiento": res_m["id_movimiento"],
+                            "producto": res_m["producto"],
+                            "lote": res_m["codigo_lote_proveedor"],
+                            "motivo": res_m["motivo"],
+                            "cantidad": res_m["cantidad"],
+                            "unidad": res_m["unidad_medida"],
+                            "costo_unitario": res_m["costo_unitario"],
+                            "costo_total_perdida": res_m["costo_total_perdida"],
+                            "nuevo_stock": res_m["nuevo_stock"],
+                        }
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al procesar la merma: {e}")
+
+    # ==============================================================================
+    # REPORTE ESTADÍSTICO DE CAUSAS RAÍZ (ETAPA 2 INACAP [19, 24])
+    # ==============================================================================
+    st.markdown("---")
+    st.markdown("#### 📊 Reporte Estadístico de Causas de Merma (Etapa 2 - INACAP [19, 24])")
+    st.caption(
+        "Distribución analítica y costo de pérdidas por causa raíz tipificada. "
+        "Permite priorizar intervenciones operativas (mantención de frío, compras FEFO o capacitación en porcionado)."
+    )
+
+    df_est_causas = db.load_estadisticas_mermas_causa(id_local=id_local_activo)
+
+    if not df_est_causas.empty and df_est_causas["costo_total_perdida"].sum() > 0:
+        col_graf_m, col_tbl_m = st.columns([1.2, 1.3])
+
+        with col_graf_m:
+            with st.container(border=True):
+                st.markdown("##### 🍩 Distribución de Costos por Causa ($ CLP)")
+                colores_causas = {
+                    "Ruptura de cadena de frío en cocina": "#0284c7",   # Azul frío
+                    "Vencimiento de fecha límite FEFO": "#ef4444",      # Rojo alerta
+                    "Deterioro organoléptico en recepción": "#f59e0b",  # Ámbar advertencia
+                    "Manipulación / Error de porcionado": "#8b5cf6",    # Morado operativo
+                }
+                donut_merma_data = []
+                for _, r_c in df_est_causas.iterrows():
+                    causa_name = r_c["causa_raiz"]
+                    val_costo = float(r_c["costo_total_perdida"])
+                    color_item = colores_causas.get(causa_name, "#64748b")
+                    donut_merma_data.append({
+                        "value": val_costo,
+                        "name": causa_name,
+                        "itemStyle": {"color": color_item}
+                    })
+
+                option_donut_merma = {
+                    "tooltip": {
+                        "trigger": "item",
+                        "formatter": "{b}: <br/><b>${c:,.0f} CLP</b> ({d}%)"
+                    },
+                    "legend": {
+                        "bottom": "0%",
+                        "left": "center",
+                        "textStyle": {"fontSize": 11, "color": "#475569"}
+                    },
+                    "series": [
+                        {
+                            "name": "Causa Raíz",
+                            "type": "pie",
+                            "radius": ["45%", "70%"],
+                            "center": ["50%", "42%"],
+                            "avoidLabelOverlap": False,
+                            "itemStyle": {
+                                "borderRadius": 6,
+                                "borderColor": "#ffffff",
+                                "borderWidth": 2
+                            },
+                            "label": {"show": False},
+                            "emphasis": {
+                                "label": {
+                                    "show": True,
+                                    "fontSize": 13,
+                                    "fontWeight": "bold",
+                                    "formatter": "{d}%"
+                                }
+                            },
+                            "data": donut_merma_data
+                        }
+                    ]
+                }
+                render_echarts(option_donut_merma, height=270, key="donut_causas_merma")
+
+        with col_tbl_m:
+            with st.container(border=True):
+                st.markdown("##### 📋 Matriz Cuantitativa de Pérdidas")
+                st.dataframe(
+                    df_est_causas,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "causa_raiz": "Causa Raíz Tipificada",
+                        "total_eventos": st.column_config.NumberColumn("Actas", format="%d"),
+                        "total_kg": st.column_config.NumberColumn("Total Kilos", format="%.2f kg"),
+                        "costo_total_perdida": st.column_config.NumberColumn("Pérdida Económica", format="$%d CLP"),
+                        "pct_costo": st.column_config.ProgressColumn(
+                            "% Impacto",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=100
+                        ),
                     }
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error al procesar la merma: {e}")
+                )
+
+                # Exportar para el informe de la Etapa 2
+                csv_causas = df_est_causas.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Exportar Resumen Estadístico (CSV para Informe)",
+                    data=csv_causas,
+                    file_name="reporte_causas_merma_etapa2.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+    else:
+        st.info("No hay suficientes registros de merma para generar el reporte estadístico.")
 
     # Historial de Mermas
     st.markdown("---")

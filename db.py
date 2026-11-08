@@ -657,6 +657,56 @@ def load_stock_disponible_local(id_local: int) -> pd.DataFrame:
         return pd.read_sql(query, connection, params={"id_local": id_local})
 
 
+def load_top_riesgo_traslado(id_local: int, limit: int = 7) -> pd.DataFrame:
+    """
+    Carga los N lotes con stock > 0 más riesgosos de un local,
+    priorizados por criterio FEFO (vencimiento más cercano), mayor valor en riesgo y FIFO.
+    Incluye semáforo de alerta, días para vencer y valor económico en riesgo ($ CLP).
+    """
+    query = text(
+        """
+        SELECT
+            s.id_stock,
+            s.id_lote,
+            s.id_local,
+            p.id_producto,
+            p.nombre AS producto,
+            p.unidad_medida,
+            l.codigo_lote_proveedor,
+            s.cantidad AS stock_disponible,
+            l.fecha_vencimiento,
+            (l.fecha_vencimiento - CURRENT_DATE) AS dias_para_vencer,
+            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+            ROUND(s.cantidad * COALESCE(dc.costo_unitario, 0), 0) AS valor_en_riesgo,
+            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
+            CASE
+                WHEN (l.fecha_vencimiento < CURRENT_DATE) THEN '🔴 Vencido'
+                WHEN (l.fecha_vencimiento - CURRENT_DATE <= 2) THEN '🔴 Crítico (≤2d)'
+                WHEN (l.fecha_vencimiento - CURRENT_DATE <= 5) THEN '🟠 Urgente (3-5d)'
+                WHEN (l.fecha_vencimiento - CURRENT_DATE <= 10) THEN '🟡 Preventivo (6-10d)'
+                ELSE '🟢 Normal (>10d)'
+            END AS estado_alerta,
+            CONCAT(
+                p.nombre,
+                ' | Lote #', l.id_lote,
+                ' (Ref: ', l.codigo_lote_proveedor, ')',
+                ' | Disp: ', ROUND(s.cantidad, 3), ' ', p.unidad_medida,
+                ' | Vence: ', l.fecha_vencimiento,
+                ' (', (l.fecha_vencimiento - CURRENT_DATE), ' d)'
+            ) AS display_label
+        FROM stock_lote_local AS s
+        JOIN lotes AS l ON l.id_lote = s.id_lote
+        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+        JOIN productos AS p ON p.id_producto = dc.id_producto
+        WHERE s.id_local = :id_local AND s.cantidad > 0
+        ORDER BY l.fecha_vencimiento ASC, valor_en_riesgo DESC, l.id_lote ASC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as connection:
+        return pd.read_sql(query, connection, params={"id_local": id_local, "limit": limit})
+
+
 def registrar_salida_cocina(
     id_local: int,
     id_lote: int,
@@ -759,6 +809,15 @@ def registrar_salida_cocina(
         }
 
 
+# Catálogo Oficial de Causa Raíz para Control de Mermas (Bajas) - Etapa 2
+CAUSAS_RAIZ_MERMA = (
+    "Ruptura de cadena de frío en cocina",
+    "Vencimiento de fecha límite FEFO",
+    "Deterioro organoléptico en recepción",
+    "Manipulación / Error de porcionado",
+)
+
+
 def registrar_merma(
     id_local: int,
     id_lote: int,
@@ -768,11 +827,24 @@ def registrar_merma(
     id_usuario: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Registra una baja formal por merma, vencimiento o pérdida de cadena de frío.
+    Registra una baja formal por merma con tipificación obligatoria de causa raíz.
     Calcula el costo financiero de la pérdida y actualiza el inventario atómicamente.
     """
     if cantidad <= 0:
         raise ValueError("La cantidad de merma debe ser mayor a 0.")
+
+    # Validación estricta de causa raíz
+    motivo_limpio = motivo.strip()
+    if motivo_limpio not in CAUSAS_RAIZ_MERMA:
+        # Permitir coincidencia tolerante en caso de prefijos o espacios
+        coincidencias = [c for c in CAUSAS_RAIZ_MERMA if c.lower() in motivo_limpio.lower()]
+        if coincidencias:
+            motivo_limpio = coincidencias[0]
+        else:
+            raise ValueError(
+                f"Causa raíz inválida: '{motivo}'. "
+                f"Debe clasificar obligatoriamente en una de las causas oficiales: {', '.join(CAUSAS_RAIZ_MERMA)}."
+            )
 
     with engine.begin() as conn:
         # 1. Validar y bloquear stock actual obteniendo el costo unitario
@@ -802,8 +874,8 @@ def registrar_merma(
                 f"Stock insuficiente: disponible {stock_actual:.3f}, merma a declarar {cantidad:.3f}."
             )
 
-        # 2. Registrar movimiento tipificado como MERMA
-        referencia_merma = f"MERMA: {motivo}"
+        # 2. Registrar movimiento tipificado como MERMA con causa raíz oficial
+        referencia_merma = f"MERMA: {motivo_limpio}"
         q_insert_mov = text(
             """
             INSERT INTO movimientos (
@@ -866,7 +938,7 @@ def registrar_merma(
 
         return {
             "id_movimiento": id_movimiento,
-            "motivo": motivo,
+            "motivo": motivo_limpio,
             "producto": producto,
             "codigo_lote_proveedor": codigo_lote_prov,
             "unidad_medida": unidad_medida,
@@ -928,6 +1000,49 @@ def load_resumen_mermas(id_local: Optional[int] = None) -> Dict[str, Any]:
         "total_kilos": float(df_m["cantidad"].sum()),
         "total_costo_merma": float(df_m["costo_total_merma"].sum()),
     }
+
+
+def load_estadisticas_mermas_causa(id_local: Optional[int] = None) -> pd.DataFrame:
+    """
+    Agrupa y calcula estadísticas por Causa Raíz de Merma (Etapa 2 - Control de Costos e Inocuidad):
+    - Conteo de actas / eventos.
+    - Volumen descartado en kg.
+    - Pérdida económica total en CLP.
+    - Porcentaje de participación respecto al total de pérdidas.
+    """
+    where_local = "AND m.id_local_origen = :id_local" if id_local else ""
+    query = text(
+        f"""
+        WITH mermas_base AS (
+            SELECT
+                REPLACE(m.referencia, 'MERMA: ', '') AS causa_raiz,
+                dm.cantidad,
+                ROUND(dm.cantidad * COALESCE(dc.costo_unitario, 0), 2) AS costo_total
+            FROM detalle_movimiento AS dm
+            JOIN movimientos AS m ON m.id_movimiento = dm.id_movimiento
+            JOIN lotes AS l ON l.id_lote = dm.id_lote
+            JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+            WHERE m.referencia LIKE 'MERMA:%'
+            {where_local}
+        )
+        SELECT
+            causa_raiz,
+            COUNT(*) AS total_eventos,
+            ROUND(SUM(cantidad), 3) AS total_kg,
+            ROUND(SUM(costo_total), 0) AS costo_total_perdida,
+            ROUND(
+                100.0 * SUM(costo_total) / NULLIF(SUM(SUM(costo_total)) OVER (), 0),
+                1
+            ) AS pct_costo
+        FROM mermas_base
+        GROUP BY causa_raiz
+        ORDER BY costo_total_perdida DESC;
+        """
+    )
+    with engine.connect() as conn:
+        params = {"id_local": id_local} if id_local else {}
+        df = pd.read_sql(query, conn, params=params)
+        return df
 
 
 def registrar_traslado_local(
