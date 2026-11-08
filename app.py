@@ -2326,9 +2326,45 @@ with tab_traslados:
         "se preserva de forma estricta para garantizar trazabilidad continua."
     )
 
+    # Control de Vouchers de Despacho
+    if "voucher_traslado_consolidado" in st.session_state:
+        v_cons = st.session_state.pop("voucher_traslado_consolidado")
+        st.success("✅ ¡Despacho consolidado y guías emitidas exitosamente en base de datos!")
+        col_v1, col_v2 = st.columns(2)
+        if v_cons.get("ida"):
+            with col_v1:
+                v_ida = v_cons["ida"]
+                st.markdown(
+                    f"""
+                    <div class="voucher-card" style="border-left: 5px solid #2a9d8f; background: #f0fdf4;">
+                        <h4 style="margin:0 0 8px 0; color:#0d2b45;">🔴 Guía de Despacho IDA #{v_ida['id_movimiento']}</h4>
+                        • <strong>Referencia:</strong> <code>{v_ida['referencia']}</code><br>
+                        • <strong>Ruta:</strong> <strong>{v_cons['origen']}</strong> ➡️ <strong>{v_cons['destino']}</strong><br>
+                        • <strong>Partidas emitidas:</strong> <code>{v_ida['total_partidas']} lotes</code> (<code>{v_ida['total_kg']:.3f} kg</code>)<br>
+                        • <strong>Trazabilidad:</strong> Códigos de lote preservados con éxito.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        if v_cons.get("retorno"):
+            with col_v2:
+                v_ret = v_cons["retorno"]
+                st.markdown(
+                    f"""
+                    <div class="voucher-card" style="border-left: 5px solid #0284c7; background: #f0f9ff;">
+                        <h4 style="margin:0 0 8px 0; color:#0d2b45;">🔄 Guía de RETORNO #{v_ret['id_movimiento']}</h4>
+                        • <strong>Referencia:</strong> <code>{v_ret['referencia']}</code><br>
+                        • <strong>Ruta:</strong> <strong>{v_cons['destino']}</strong> ➡️ <strong>{v_cons['origen']}</strong><br>
+                        • <strong>Partidas retornadas:</strong> <code>{v_ret['total_partidas']} lotes</code> (<code>{v_ret['total_kg']:.3f} kg</code>)<br>
+                        • <strong>Logística de Retorno:</strong> Backhaul completado al 100%.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
     if "voucher_traslado" in st.session_state:
         v_tr = st.session_state.pop("voucher_traslado")
-        st.success("✅ ¡Traslado completado en base de datos!")
+        st.success("✅ ¡Traslado individual completado en base de datos!")
         st.markdown(
             f"""
             <div class="voucher-card" style="border-left: 5px solid #2a9d8f; background: #f0fdf4;">
@@ -2455,26 +2491,65 @@ with tab_traslados:
                     }
                 )
 
-                # Selector rápido / Pinchar y Trasladar
+                # Selector rápido / Cargar a Guía de Ida
                 lotes_ida_dict = {
                     int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
                     for _, r in df_top_origen.iterrows()
                 }
                 
-                col_pin_sel, col_pin_btn = st.columns([3, 1])
+                col_pin_sel, col_pin_btn1, col_pin_btn2 = st.columns([3, 1.2, 1.2])
                 with col_pin_sel:
                     lote_pin_ida = st.selectbox(
-                        "Pinchar partida crítica para flete de ida:*",
+                        "Seleccionar insumo de origen:*",
                         options=list(lotes_ida_dict.keys()),
                         format_func=lambda k: lotes_ida_dict[k],
                         key="sel_pin_ida",
                         label_visibility="collapsed",
                     )
-                with col_pin_btn:
-                    if st.button("📌 Pinchar", key="btn_pin_ida", use_container_width=True):
-                        st.session_state["lote_traslado_seleccionado"] = lote_pin_ida
-                        st.toast(f"✅ Partida Lote #{lote_pin_ida} fijada para despacho.", icon="📦")
-                        st.rerun()
+                with col_pin_btn1:
+                    if st.button("➕ Cargar", key="btn_add_ida", use_container_width=True, help="Agrega esta partida a la vista previa de la Guía de Ida."):
+                        row_ida = df_top_origen[df_top_origen["id_lote"] == lote_pin_ida].iloc[0]
+                        if "carro_ida_items" not in st.session_state:
+                            st.session_state["carro_ida_items"] = []
+                        if not any(it["id_lote"] == lote_pin_ida for it in st.session_state["carro_ida_items"]):
+                            st.session_state["carro_ida_items"].append({
+                                "id_lote": int(row_ida["id_lote"]),
+                                "producto": str(row_ida["producto"]),
+                                "codigo_lote_proveedor": str(row_ida["codigo_lote_proveedor"]),
+                                "dias_para_vencer": int(row_ida["dias_para_vencer"]),
+                                "stock_disponible": float(row_ida["stock_disponible"]),
+                                "cantidad": float(row_ida["stock_disponible"]),
+                                "costo_unitario": float(row_ida["costo_unitario"]),
+                                "subtotal_valor": float(row_ida["valor_en_riesgo"]),
+                                "unidad_medida": str(row_ida["unidad_medida"]),
+                            })
+                            st.toast(f"✅ #{lote_pin_ida} {row_ida['producto']} agregado a Guía de Ida.", icon="📦")
+                            st.rerun()
+                        else:
+                            st.info("Esta partida ya se encuentra cargada en la Guía de Ida.")
+                with col_pin_btn2:
+                    if st.button("⚡ Cargar 7", key="btn_add_all_ida", use_container_width=True, help="Agrega las 7 partidas críticas a la Guía de Ida de una sola vez."):
+                        if "carro_ida_items" not in st.session_state:
+                            st.session_state["carro_ida_items"] = []
+                        agregados = 0
+                        for _, row_ida in df_top_origen.iterrows():
+                            lid = int(row_ida["id_lote"])
+                            if not any(it["id_lote"] == lid for it in st.session_state["carro_ida_items"]):
+                                st.session_state["carro_ida_items"].append({
+                                    "id_lote": lid,
+                                    "producto": str(row_ida["producto"]),
+                                    "codigo_lote_proveedor": str(row_ida["codigo_lote_proveedor"]),
+                                    "dias_para_vencer": int(row_ida["dias_para_vencer"]),
+                                    "stock_disponible": float(row_ida["stock_disponible"]),
+                                    "cantidad": float(row_ida["stock_disponible"]),
+                                    "costo_unitario": float(row_ida["costo_unitario"]),
+                                    "subtotal_valor": float(row_ida["valor_en_riesgo"]),
+                                    "unidad_medida": str(row_ida["unidad_medida"]),
+                                })
+                                agregados += 1
+                        if agregados > 0:
+                            st.toast(f"✅ Se cargaron {agregados} partidas críticas a la Guía de Ida.", icon="🚀")
+                            st.rerun()
 
     # PANEL 2: OPTIMIZACIÓN DE RETORNO / BACKHAUL (DESTINO -> ORIGEN)
     with col_panel_vuelta:
@@ -2525,52 +2600,336 @@ with tab_traslados:
                     for _, r in df_top_destino.iterrows()
                 }
 
-                col_ret_sel, col_ret_btn = st.columns([2.5, 1.5])
+                col_ret_sel, col_ret_btn1, col_ret_btn2 = st.columns([2.6, 1.2, 1.2])
                 with col_ret_sel:
                     lote_ret_sel = st.selectbox(
-                        "Elegir partida a rescatar en retorno:*",
+                        "Seleccionar insumo de retorno:*",
                         options=list(lotes_vuelta_dict.keys()),
                         format_func=lambda k: lotes_vuelta_dict[k],
                         key="sel_ret_dest",
                         label_visibility="collapsed",
                     )
-                with col_ret_btn:
-                    if st.button("🔄 Traer en Retorno", key="btn_invertir_flete", use_container_width=True, help="Invierte la ruta y fija esta partida para traerla de vuelta."):
-                        st.session_state["traslado_intercambiar_origen"] = int(local_traslado_destino_id)
-                        st.session_state["traslado_intercambiar_destino"] = int(local_traslado_origen_id)
-                        st.session_state["lote_traslado_seleccionado"] = lote_ret_sel
-                        st.toast(f"🔄 Ruta invertida: cargando Lote #{lote_ret_sel} para flete de retorno.", icon="🚚")
-                        st.rerun()
+                with col_ret_btn1:
+                    if st.button("➕ Retorno", key="btn_add_ret", use_container_width=True, help="Agrega esta partida a la vista previa de la Guía de Retorno."):
+                        row_ret = df_top_destino[df_top_destino["id_lote"] == lote_ret_sel].iloc[0]
+                        if "carro_retorno_items" not in st.session_state:
+                            st.session_state["carro_retorno_items"] = []
+                        if not any(it["id_lote"] == lote_ret_sel for it in st.session_state["carro_retorno_items"]):
+                            st.session_state["carro_retorno_items"].append({
+                                "id_lote": int(row_ret["id_lote"]),
+                                "producto": str(row_ret["producto"]),
+                                "codigo_lote_proveedor": str(row_ret["codigo_lote_proveedor"]),
+                                "dias_para_vencer": int(row_ret["dias_para_vencer"]),
+                                "stock_disponible": float(row_ret["stock_disponible"]),
+                                "cantidad": float(row_ret["stock_disponible"]),
+                                "costo_unitario": float(row_ret["costo_unitario"]),
+                                "subtotal_valor": float(row_ret["valor_en_riesgo"]),
+                                "unidad_medida": str(row_ret["unidad_medida"]),
+                            })
+                            st.toast(f"🔄 #{lote_ret_sel} {row_ret['producto']} agregado a Guía de Retorno.", icon="🚚")
+                            st.rerun()
+                        else:
+                            st.info("Esta partida ya se encuentra cargada en la Guía de Retorno.")
+                with col_ret_btn2:
+                    if st.button("⚡ Cargar 7", key="btn_add_all_ret", use_container_width=True, help="Agrega las 7 partidas críticas de destino a la Guía de Retorno."):
+                        if "carro_retorno_items" not in st.session_state:
+                            st.session_state["carro_retorno_items"] = []
+                        agregados_ret = 0
+                        for _, row_ret in df_top_destino.iterrows():
+                            lid = int(row_ret["id_lote"])
+                            if not any(it["id_lote"] == lid for it in st.session_state["carro_retorno_items"]):
+                                st.session_state["carro_retorno_items"].append({
+                                    "id_lote": lid,
+                                    "producto": str(row_ret["producto"]),
+                                    "codigo_lote_proveedor": str(row_ret["codigo_lote_proveedor"]),
+                                    "dias_para_vencer": int(row_ret["dias_para_vencer"]),
+                                    "stock_disponible": float(row_ret["stock_disponible"]),
+                                    "cantidad": float(row_ret["stock_disponible"]),
+                                    "costo_unitario": float(row_ret["costo_unitario"]),
+                                    "subtotal_valor": float(row_ret["valor_en_riesgo"]),
+                                    "unidad_medida": str(row_ret["unidad_medida"]),
+                                })
+                                agregados_ret += 1
+                        if agregados_ret > 0:
+                            st.toast(f"🔄 Se cargaron {agregados_ret} partidas a la Guía de Retorno.", icon="🚀")
+                            st.rerun()
 
     # ==========================================================================
-    # FORMULARIO / MANIFIESTO DE DESPACHO
+    # SECCIÓN: VISTA PREVIA Y MANIFIESTO DE GUÍAS DE DESPACHO (DOS TABLAS)
     # ==========================================================================
     st.markdown("---")
-    st.markdown("#### 📦 Guía de Despacho y Registro de Traslado")
+    st.markdown("#### 📋 Vista Previa de las Guías de Despacho (Manifiesto de Carga)")
+    st.caption(
+        "Detalle consolidado de los movimientos seleccionados para el flete de ida y el retorno optimizado. "
+        "Ajusta cantidades o remueve partidas antes de emitir formalmente las guías."
+    )
 
-    if stock_disp_traslado.empty:
-        st.warning("El local de origen seleccionado no cuenta con insumos disponibles para traspasar.")
-    else:
-        dict_lotes_traslado = {
-            int(row["id_lote"]): row["display_label"]
-            for _, row in stock_disp_traslado.iterrows()
-        }
+    if "carro_ida_items" not in st.session_state:
+        st.session_state["carro_ida_items"] = []
+    if "carro_retorno_items" not in st.session_state:
+        st.session_state["carro_retorno_items"] = []
 
-        # Comprobar si hay un lote preseleccionado desde las tablas de riesgo
-        lote_preseleccionado = st.session_state.get("lote_traslado_seleccionado")
-        if lote_preseleccionado not in dict_lotes_traslado:
-            lote_preseleccionado = list(dict_lotes_traslado.keys())[0]
+    col_preview_ida, col_preview_retorno = st.columns(2)
 
-        idx_default_lote = list(dict_lotes_traslado.keys()).index(lote_preseleccionado)
+    # PREVIEW TABLA 1: GUÍA DE DESPACHO - IDA
+    with col_preview_ida:
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div style="background:#fee2e2; border-left:4px solid #e63946; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
+                    <strong style="color:#991b1b; font-size:1rem;">🔴 Guía de Despacho - IDA</strong><br>
+                    <span style="font-size:0.8rem; color:#7f1d1d;">Ruta: <b>{nombre_orig_simple}</b> ➡️ <b>{nombre_dest_simple}</b></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            ref_def_ida = f"GT-IDA-{local_traslado_origen_id}{local_traslado_destino_id}-{pd.Timestamp.now().strftime('%Y%m%d%H%M')}"
+            ref_guia_ida = st.text_input("N° Guía / Referencia de Ida:*", value=ref_def_ida, key="ref_despacho_ida")
+
+            items_ida = st.session_state["carro_ida_items"]
+            if not items_ida:
+                st.info("No hay partidas cargadas en la Guía de Ida. Selecciona y presiona **➕ Cargar** en el panel superior izquierdo.")
+                tot_kg_ida = 0.0
+                tot_val_ida = 0.0
+            else:
+                df_editor_ida = pd.DataFrame(items_ida)
+                edited_ida = st.data_editor(
+                    df_editor_ida[[
+                        "id_lote", "producto", "dias_para_vencer",
+                        "stock_disponible", "cantidad", "subtotal_valor"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    key="editor_guia_ida",
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
+                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.2f kg"),
+                        "cantidad": st.column_config.NumberColumn("A Enviar (kg)", min_value=0.001, format="%.3f", required=True),
+                        "subtotal_valor": st.column_config.NumberColumn("Valor Riesgo", disabled=True, format="$%d"),
+                    }
+                )
+                nuevos_items_ida = []
+                for _, r_ed in edited_ida.iterrows():
+                    match_orig = next((x for x in items_ida if x["id_lote"] == r_ed["id_lote"]), None)
+                    if match_orig:
+                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
+                        match_orig["cantidad"] = cant_real
+                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
+                        nuevos_items_ida.append(match_orig)
+                st.session_state["carro_ida_items"] = nuevos_items_ida
+
+                tot_kg_ida = sum(it["cantidad"] for it in nuevos_items_ida)
+                tot_val_ida = sum(it["subtotal_valor"] for it in nuevos_items_ida)
+
+                col_tot_i1, col_tot_i2 = st.columns(2)
+                with col_tot_i1:
+                    st.metric("Total Kilos Ida", f"{tot_kg_ida:.2f} kg")
+                with col_tot_i2:
+                    st.metric("Capital Rescatado", f"${tot_val_ida:,.0f} CLP")
+
+                if st.button("🗑️ Vaciar Guía de Ida", key="btn_clear_ida"):
+                    st.session_state["carro_ida_items"] = []
+                    st.rerun()
+
+    # PREVIEW TABLA 2: GUÍA DE DESPACHO - RETORNO (BACKHAUL)
+    with col_preview_retorno:
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div style="background:#e0f2fe; border-left:4px solid #0284c7; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
+                    <strong style="color:#0369a1; font-size:1rem;">🔄 Guía de Despacho - RETORNO</strong><br>
+                    <span style="font-size:0.8rem; color:#0c4a6e;">Ruta: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b> (Aprovechamiento de flete)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            ref_def_ret = f"GT-RET-{local_traslado_destino_id}{local_traslado_origen_id}-{pd.Timestamp.now().strftime('%Y%m%d%H%M')}"
+            ref_guia_ret = st.text_input("N° Guía / Referencia de Retorno:*", value=ref_def_ret, key="ref_despacho_ret")
+
+            items_ret = st.session_state["carro_retorno_items"]
+            if not items_ret:
+                st.info("No hay partidas cargadas en la Guía de Retorno. Selecciona y presiona **➕ Retorno** en el panel superior derecho.")
+                tot_kg_ret = 0.0
+                tot_val_ret = 0.0
+            else:
+                df_editor_ret = pd.DataFrame(items_ret)
+                edited_ret = st.data_editor(
+                    df_editor_ret[[
+                        "id_lote", "producto", "dias_para_vencer",
+                        "stock_disponible", "cantidad", "subtotal_valor"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    key="editor_guia_retorno",
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
+                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.2f kg"),
+                        "cantidad": st.column_config.NumberColumn("A Retornar (kg)", min_value=0.001, format="%.3f", required=True),
+                        "subtotal_valor": st.column_config.NumberColumn("Valor Riesgo", disabled=True, format="$%d"),
+                    }
+                )
+                nuevos_items_ret = []
+                for _, r_ed in edited_ret.iterrows():
+                    match_orig = next((x for x in items_ret if x["id_lote"] == r_ed["id_lote"]), None)
+                    if match_orig:
+                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
+                        match_orig["cantidad"] = cant_real
+                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
+                        nuevos_items_ret.append(match_orig)
+                st.session_state["carro_retorno_items"] = nuevos_items_ret
+
+                tot_kg_ret = sum(it["cantidad"] for it in nuevos_items_ret)
+                tot_val_ret = sum(it["subtotal_valor"] for it in nuevos_items_ret)
+
+                col_tot_r1, col_tot_r2 = st.columns(2)
+                with col_tot_r1:
+                    st.metric("Total Kilos Retorno", f"{tot_kg_ret:.2f} kg")
+                with col_tot_r2:
+                    st.metric("Capital Rescatado", f"${tot_val_ret:,.0f} CLP")
+
+                if st.button("🗑️ Vaciar Guía de Retorno", key="btn_clear_ret"):
+                    st.session_state["carro_retorno_items"] = []
+                    st.rerun()
+
+    # PANEL HORIZONTAL: BALANCE LOGÍSTICO Y EMISIÓN CONSOLIDADA
+    hay_ida = len(st.session_state["carro_ida_items"]) > 0
+    hay_ret = len(st.session_state["carro_retorno_items"]) > 0
+
+    if hay_ida or hay_ret:
+        peso_total_flete = tot_kg_ida + tot_kg_ret
+        valor_total_flete = tot_val_ida + tot_val_ret
+        pct_aprovechamiento = 100 if (hay_ida and hay_ret) else 50
+        color_eficiencia = "#16a34a" if pct_aprovechamiento == 100 else "#ea580c"
 
         with st.container(border=True):
-            with st.form("form_traslado_lotes", clear_on_submit=False):
+            st.markdown(
+                f"""
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">RESUMEN LOGÍSTICO DEL VIAJE REDONDO:</span><br>
+                        <strong style="font-size:1.15rem; color:#0f172a;">🚚 Carga Total Movilizada: {peso_total_flete:.2f} kg</strong>
+                    </div>
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">CAPITAL TOTAL RESCATADO:</span><br>
+                        <strong style="font-size:1.15rem; color:#0284c7;">💰 ${valor_total_flete:,.0f} CLP</strong>
+                    </div>
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">APROVECHAMIENTO FLETE:</span><br>
+                        <strong style="font-size:1.15rem; color:{color_eficiencia};">⚖️ {pct_aprovechamiento}% ({'Ida + Retorno Completo' if pct_aprovechamiento == 100 else 'Solo un sentido'})</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            obs_despacho_consolidado = st.text_area(
+                "Protocolo y Condiciones de Transporte (Inocuidad y Cadena de Frío):*",
+                value="Cadena de frío controlada con termómetro digital en hieleras selladas. Transporte directo sin aperturas intermedias.",
+                height=55,
+                key="obs_transporte_cons"
+            )
+
+            col_btn_emision1, col_btn_emision2 = st.columns([2, 1])
+            with col_btn_emision1:
+                if hay_ida and hay_ret:
+                    btn_emitir_global = st.button(
+                        f"🚚 Confirmar y Emitir Ambas Guías ({len(st.session_state['carro_ida_items'])} Ida + {len(st.session_state['carro_retorno_items'])} Retorno)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ambas"
+                    )
+                elif hay_ida:
+                    btn_emitir_global = st.button(
+                        f"🚚 Confirmar y Emitir Guía de Despacho de IDA ({len(st.session_state['carro_ida_items'])} partidas | {tot_kg_ida:.2f} kg)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ida_solo"
+                    )
+                else:
+                    btn_emitir_global = st.button(
+                        f"🔄 Confirmar y Emitir Guía de RETORNO ({len(st.session_state['carro_retorno_items'])} partidas | {tot_kg_ret:.2f} kg)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ret_solo"
+                    )
+
+            with col_btn_emision2:
+                if st.button("🗑️ Vaciar Todo el Manifiesto", use_container_width=True, key="btn_vaciar_todo"):
+                    st.session_state["carro_ida_items"] = []
+                    st.session_state["carro_retorno_items"] = []
+                    st.rerun()
+
+            if btn_emitir_global:
+                try:
+                    res_ida_dict = None
+                    res_ret_dict = None
+
+                    # Emitir Ida si hay ítems
+                    if hay_ida:
+                        res_ida_dict = db.registrar_traslado_consolidado(
+                            id_local_origen=int(local_traslado_origen_id),
+                            id_local_destino=int(local_traslado_destino_id),
+                            partidas=st.session_state["carro_ida_items"],
+                            referencia=ref_guia_ida.strip() or "Guía de Ida",
+                            observaciones=obs_despacho_consolidado.strip() or None,
+                        )
+
+                    # Emitir Retorno si hay ítems
+                    if hay_ret:
+                        res_ret_dict = db.registrar_traslado_consolidado(
+                            id_local_origen=int(local_traslado_destino_id),
+                            id_local_destino=int(local_traslado_origen_id),
+                            partidas=st.session_state["carro_retorno_items"],
+                            referencia=ref_guia_ret.strip() or "Guía de Retorno",
+                            observaciones=obs_despacho_consolidado.strip() or None,
+                        )
+
+                    # Limpiar carritos
+                    st.session_state["carro_ida_items"] = []
+                    st.session_state["carro_retorno_items"] = []
+
+                    st.session_state["voucher_traslado_consolidado"] = {
+                        "ida": res_ida_dict,
+                        "retorno": res_ret_dict,
+                        "origen": nombre_orig_simple,
+                        "destino": nombre_dest_simple,
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al emitir el manifiesto consolidado de despacho: {e}")
+
+    # ==========================================================================
+    # MODALIDAD DE TRASLADO INDIVIDUAL DE RESPALDO (MANUAL)
+    # ==========================================================================
+    with st.expander("➕ Registro de Traslado Individual Manual (1 solo lote)", expanded=False):
+        if stock_disp_traslado.empty:
+            st.warning("El local de origen seleccionado no cuenta con insumos disponibles para traspasar.")
+        else:
+            dict_lotes_traslado = {
+                int(row["id_lote"]): row["display_label"]
+                for _, row in stock_disp_traslado.iterrows()
+            }
+
+            lote_preseleccionado = st.session_state.get("lote_traslado_seleccionado")
+            if lote_preseleccionado not in dict_lotes_traslado:
+                lote_preseleccionado = list(dict_lotes_traslado.keys())[0]
+
+            idx_default_lote = list(dict_lotes_traslado.keys()).index(lote_preseleccionado)
+
+            with st.form("form_traslado_lotes_manual", clear_on_submit=False):
                 lote_traslado_sel = st.selectbox(
                     "Lote a transferir hacia la otra sucursal:*",
                     options=list(dict_lotes_traslado.keys()),
                     index=idx_default_lote,
                     format_func=lambda k: dict_lotes_traslado[k],
-                    help="Auto-seleccionado según el insumo pinchado en las tablas de riesgo FEFO superiores.",
                 )
 
                 fila_traslado_sel = stock_disp_traslado[stock_disp_traslado["id_lote"] == lote_traslado_sel].iloc[0]
@@ -2587,12 +2946,10 @@ with tab_traslados:
                         value=float(max_traslado),
                         step=0.5,
                         format="%.3f",
-                        help=f"Stock máximo disponible en origen: {max_traslado:.3f} {unidad_traslado}. Pre-cargado al 100% para despejar riesgo de caducidad.",
                     )
                     ref_traslado = st.text_input(
                         "N° de Guía o Referencia de Traslado:*",
                         value=f"GT-{local_traslado_origen_id}{local_traslado_destino_id}-{fila_traslado_sel['codigo_lote_proveedor'][-6:] if len(fila_traslado_sel['codigo_lote_proveedor']) >= 6 else '001'}",
-                        placeholder="Ej. GT-2026-0089",
                     )
 
                 with col_sub_t2:
@@ -2603,50 +2960,49 @@ with tab_traslados:
                     st.markdown(
                         f"""
                         <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px;">
-                            <strong>Detalle y Diagnóstico del Despacho:</strong><br>
+                            <strong>Detalle del Despacho Individual:</strong><br>
                             • <strong>Insumo:</strong> {fila_traslado_sel['producto']} (Lote: <code>{fila_traslado_sel['codigo_lote_proveedor']}</code>)<br>
                             • <strong>Caducidad FEFO:</strong> {fila_traslado_sel['fecha_vencimiento']} (<strong style="color:{color_dias};">{dias_venc} días restantes</strong>)<br>
-                            • <strong>Capital Rescatado:</strong> <code>${valor_transferido_clp:,.0f} CLP</code> (${costo_unit_lote:,.0f} /{unidad_traslado})<br>
-                            • <strong>Stock Disponible Actual:</strong> <code>{max_traslado:.3f} {unidad_traslado}</code>
+                            • <strong>Capital:</strong> <code>${valor_transferido_clp:,.0f} CLP</code><br>
+                            • <strong>Stock Disponible:</strong> <code>{max_traslado:.3f} {unidad_traslado}</code>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
                     obs_traslado = st.text_area(
-                        "Protocolo y Condiciones de Transporte (Inocuidad):*",
-                        value="Cadena de frío verificada con termómetro digital en hielera sellada. Traslado directo.",
+                        "Condiciones de Transporte:*",
+                        value="Cadena de frío verificada con termómetro en hielera sellada.",
                         height=55,
                     )
 
-                st.markdown("---")
-                btn_traslado = st.form_submit_button("🚚 Confirmar y Ejecutar Traslado entre Sucursales", type="primary", use_container_width=True)
+                btn_traslado_manual = st.form_submit_button("🚚 Ejecutar Traslado Individual", type="primary", use_container_width=True)
 
-        if btn_traslado:
-            try:
-                res_tr = db.registrar_traslado_local(
-                    id_local_origen=int(local_traslado_origen_id),
-                    id_local_destino=int(local_traslado_destino_id),
-                    id_lote=int(lote_traslado_sel),
-                    cantidad=float(cant_traslado),
-                    referencia=ref_traslado.strip() or "Traslado interno",
-                    observaciones=obs_traslado.strip() or None,
-                )
-                nombre_origen_str = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
-                nombre_destino_str = opciones_destino.get(local_traslado_destino_id, "Destino")
-                st.session_state["voucher_traslado"] = {
-                    "id_movimiento": res_tr["id_movimiento"],
-                    "origen": nombre_origen_str,
-                    "destino": nombre_destino_str,
-                    "cantidad": res_tr["cantidad"],
-                    "unidad": unidad_traslado,
-                    "nuevo_origen": res_tr["nuevo_stock_origen"],
-                    "nuevo_destino": res_tr["nuevo_stock_destino"],
-                    "producto": fila_traslado_sel["producto"],
-                    "lote": fila_traslado_sel["codigo_lote_proveedor"],
-                }
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error al registrar el traslado: {e}")
+            if btn_traslado_manual:
+                try:
+                    res_tr = db.registrar_traslado_local(
+                        id_local_origen=int(local_traslado_origen_id),
+                        id_local_destino=int(local_traslado_destino_id),
+                        id_lote=int(lote_traslado_sel),
+                        cantidad=float(cant_traslado),
+                        referencia=ref_traslado.strip() or "Traslado interno",
+                        observaciones=obs_traslado.strip() or None,
+                    )
+                    nombre_origen_str = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
+                    nombre_destino_str = opciones_destino.get(local_traslado_destino_id, "Destino")
+                    st.session_state["voucher_traslado"] = {
+                        "id_movimiento": res_tr["id_movimiento"],
+                        "origen": nombre_origen_str,
+                        "destino": nombre_destino_str,
+                        "cantidad": res_tr["cantidad"],
+                        "unidad": unidad_traslado,
+                        "nuevo_origen": res_tr["nuevo_stock_origen"],
+                        "nuevo_destino": res_tr["nuevo_stock_destino"],
+                        "producto": fila_traslado_sel["producto"],
+                        "lote": fila_traslado_sel["codigo_lote_proveedor"],
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al registrar el traslado manual: {e}")
 
     # Visualización en vivo de los últimos traslados en esta misma pestaña
     st.markdown("---")

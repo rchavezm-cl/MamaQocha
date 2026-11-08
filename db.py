@@ -1183,6 +1183,144 @@ def registrar_traslado_local(
         }
 
 
+def registrar_traslado_consolidado(
+    id_local_origen: int,
+    id_local_destino: int,
+    partidas: list,  # List[Dict[str, Any]] con: id_lote, cantidad, opcional: observaciones
+    referencia: Optional[str] = None,
+    observaciones: Optional[str] = None,
+    id_usuario: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Registra un traslado consolidado multi-lote entre dos sucursales en una sola transacción atómica.
+    Crea 1 registro cabecera en movimientos y N detalles en detalle_movimiento.
+    Actualiza atómicamente el stock de origen y destino para cada lote garantizando integridad referencial.
+    """
+    if id_local_origen == id_local_destino:
+        raise ValueError("El local de destino debe ser diferente al local de origen.")
+    if not partidas:
+        raise ValueError("Debe incluir al menos una partida para emitir la guía de traslado.")
+
+    with engine.begin() as conn:
+        # 1. Registrar cabecera del movimiento de tipo 'traslado'
+        q_insert_mov = text(
+            """
+            INSERT INTO movimientos (
+                tipo_movimiento, id_local_origen, id_local_destino,
+                id_usuario, referencia, observaciones, estado
+            )
+            VALUES (
+                'traslado', :id_local_origen, :id_local_destino,
+                :id_usuario, :referencia, :observaciones, 'confirmado'
+            )
+            RETURNING id_movimiento;
+            """
+        )
+        id_movimiento = conn.execute(
+            q_insert_mov,
+            {
+                "id_local_origen": id_local_origen,
+                "id_local_destino": id_local_destino,
+                "id_usuario": id_usuario,
+                "referencia": referencia or "Guía de traslado consolidada",
+                "observaciones": observaciones,
+            },
+        ).scalar_one()
+
+        detalles_procesados = []
+        total_kg = 0.0
+
+        for item in partidas:
+            id_lote = int(item["id_lote"])
+            cantidad = float(item["cantidad"])
+            obs_item = item.get("observaciones") or observaciones
+
+            if cantidad <= 0:
+                raise ValueError(f"La cantidad para el lote #{id_lote} debe ser mayor a 0.")
+
+            # Validar y bloquear stock en origen
+            q_stock = text(
+                """
+                SELECT cantidad
+                FROM stock_lote_local
+                WHERE id_lote = :id_lote AND id_local = :id_local_origen
+                FOR UPDATE
+                """
+            )
+            row = conn.execute(
+                q_stock, {"id_lote": id_lote, "id_local_origen": id_local_origen}
+            ).first()
+            if not row:
+                raise ValueError(f"El lote #{id_lote} no cuenta con registro de stock en el local de origen.")
+
+            stock_origen = float(row[0])
+            if stock_origen < cantidad:
+                raise ValueError(
+                    f"Stock insuficiente para lote #{id_lote}: disponible {stock_origen:.3f}, a trasladar {cantidad:.3f}."
+                )
+
+            # Insertar detalle de movimiento
+            q_insert_det = text(
+                """
+                INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
+                VALUES (:id_movimiento, :id_lote, :cantidad, :observaciones);
+                """
+            )
+            conn.execute(
+                q_insert_det,
+                {
+                    "id_movimiento": id_movimiento,
+                    "id_lote": id_lote,
+                    "cantidad": cantidad,
+                    "observaciones": obs_item,
+                },
+            )
+
+            # Descontar en origen
+            q_update_orig = text(
+                """
+                UPDATE stock_lote_local
+                SET cantidad = cantidad - :cantidad, actualizado_en = CURRENT_TIMESTAMP
+                WHERE id_lote = :id_lote AND id_local = :id_local_origen
+                """
+            )
+            conn.execute(
+                q_update_orig,
+                {"cantidad": cantidad, "id_lote": id_lote, "id_local_origen": id_local_origen},
+            )
+
+            # Sumar/upsert en destino
+            q_upsert_dest = text(
+                """
+                INSERT INTO stock_lote_local (id_lote, id_local, cantidad, actualizado_en)
+                VALUES (:id_lote, :id_local_destino, :cantidad, CURRENT_TIMESTAMP)
+                ON CONFLICT (id_lote, id_local) DO UPDATE
+                SET cantidad = stock_lote_local.cantidad + EXCLUDED.cantidad,
+                    actualizado_en = CURRENT_TIMESTAMP;
+                """
+            )
+            conn.execute(
+                q_upsert_dest,
+                {"id_lote": id_lote, "id_local_destino": id_local_destino, "cantidad": cantidad},
+            )
+
+            total_kg += cantidad
+            detalles_procesados.append({
+                "id_lote": id_lote,
+                "cantidad": cantidad,
+            })
+
+        return {
+            "id_movimiento": id_movimiento,
+            "id_local_origen": id_local_origen,
+            "id_local_destino": id_local_destino,
+            "total_partidas": len(detalles_procesados),
+            "total_kg": round(total_kg, 3),
+            "referencia": referencia,
+            "items": detalles_procesados,
+        }
+
+
 def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) -> pd.DataFrame:
     """
     Carga el historial de movimientos de salida o traslados.
