@@ -44,7 +44,7 @@ class NumberedCanvas(canvas.Canvas):
         self.drawString(54, 11 * inch - 36, "MAMÁ QOCHA | Manual de Operación y Trazabilidad en Nube")
         self.setFont("Helvetica", 8)
         self.setFillColor(colors.HexColor("#64748b"))
-        self.drawRightString(8.5 * inch - 54, 11 * inch - 36, "Versión 2.0 - PostgreSQL Neon")
+        self.drawRightString(8.5 * inch - 54, 11 * inch - 36, "Versión 2.2 - PostgreSQL 18 & Neon")
         
         # Línea de encabezado
         self.setStrokeColor(colors.HexColor("#cbd5e1"))
@@ -215,8 +215,8 @@ def generar_manual():
         [Paragraph("<b>Entorno Tecnológico:</b>", body_style), Paragraph("Python 3 + Streamlit Web + Neon Serverless PostgreSQL 18", body_style)],
         [Paragraph("<b>Cobertura Operacional:</b>", body_style), Paragraph("5 Sucursales: Centro, Norte, Sur, Oriente, Poniente", body_style)],
         [Paragraph("<b>Usuarios Destinatarios:</b>", body_style), Paragraph("Jefes de Cocina, Encargados de Bodega, Administradores y Gerencia", body_style)],
-        [Paragraph("<b>Reglas Críticas:</b>", body_style), Paragraph("Despacho FEFO (First Expired, First Out) + Termometría HACCP (≤ 4.0 °C)", body_style)],
-        [Paragraph("<b>Fecha de Emisión:</b>", body_style), Paragraph("Octubre 2026 - Versión 2.0 Productiva", body_style)]
+        [Paragraph("<b>Reglas Críticas:</b>", body_style), Paragraph("Despacho FEFO (First Expired, First Out) + Termometría HACCP (≤ 4.0 °C) + Logística Backhaul", body_style)],
+        [Paragraph("<b>Fecha de Emisión:</b>", body_style), Paragraph("Noviembre 2026 - Versión 2.2 Productiva", body_style)]
     ]
     t_meta = Table(meta_data, colWidths=[150, 350])
     t_meta.setStyle(TableStyle([
@@ -365,40 +365,53 @@ def generar_manual():
     story.append(Spacer(1, 10))
 
     # =========================================================================
-    # SECCIÓN 6: PESTAÑA 4 - TRASLADOS PREVENTIVOS INTER-SUCURSAL
+    # SECCIÓN 6: PESTAÑA 4 - TRASLADOS INTELIGENTES, TOP 7 Y OPTIMIZACIÓN DE FLETE (BACKHAUL)
     # =========================================================================
-    story.append(Paragraph("6. Módulo 4: Traslados Preventivos Entre Sucursales", h1_style))
+    story.append(Paragraph("6. Módulo 4: Traslados Inteligentes, Top 7 en Riesgo y Optimización de Flete (Backhaul)", h1_style))
     story.append(Paragraph(
-        "Herramienta estratégica para evitar mermas cuando una sucursal tiene exceso de producto perecible y otra presenta alta rotación:",
+        "Herramienta avanzada de logística inversa y redistribución prescriptiva. Erradica el flete vacío "
+        "y rescata capital inmovilizado mediante un manifiesto de carga consolidado bidireccional:",
         body_style
     ))
-    story.append(Paragraph("1. Seleccionar el <b>Local Origen</b> y el <b>Local Destino</b> (el sistema valida que sean distintos).", bullet_style))
-    story.append(Paragraph("2. Elegir el <b>Lote a Transferir</b> visualizando su fecha de vencimiento y stock disponible actual.", bullet_style))
-    story.append(Paragraph("3. Indicar la <b>Cantidad en Kilogramos</b> a trasladar y las condiciones de transporte térmico.", bullet_style))
-    story.append(Paragraph("4. <b>Garantía de Integridad:</b> El sistema transfiere el saldo preservando el mismo <code>id_lote</code> original; no crea duplicados y registra el movimiento de salida y entrada simultáneamente.", bullet_style))
+    story.append(Paragraph("• <b>Panel 1: Flete de Salida (Top 7 en Riesgo FEFO de Origen):</b> "
+                           "El sistema calcula y exhibe automáticamente los 7 insumos con menor vida útil de la sucursal emisora, "
+                           "ordenados por fecha límite de caducidad y valor en riesgo ($ CLP). Cuenta con botón rápido <i>[➕ Cargar]</i> "
+                           "y <i>[⚡ Cargar 7]</i> para añadir las partidas al manifiesto sin búsquedas manuales.", bullet_style))
+    story.append(Paragraph("• <b>Panel 2: Flete de Retorno Oportuno (Top 7 en Destino - Backhaul):</b> "
+                           "Al seleccionar el local destino, la plataforma audita inmediatamente sus 7 insumos críticos. "
+                           "Permite al operador aprovechar la vuelta del camión para traer partidas próximas a vencer en destino hacia el origen "
+                           "mediante los botones <i>[➕ Retorno]</i> y <i>[⚡ Cargar 7]</i>, alcanzando un aprovechamiento del flete del 100%.", bullet_style))
+    story.append(Paragraph("• <b>Vista Previa de Guías en Dos Tablas (Preview Dinámico):</b> "
+                           "Al pie de los paneles se generan dos tablas interactivas en paralelo: "
+                           "<b>Tabla 1 (Guía de Despacho IDA)</b> y <b>Tabla 2 (Guía de Despacho RETORNO)</b>. "
+                           "El usuario puede editar en vivo los kilogramos a trasladar con <code>st.data_editor</code> o remover partidas no deseadas con un clic.", bullet_style))
+    story.append(Paragraph("• <b>Balance Logístico y Emisión Consolidada:</b> "
+                           "Calcula en tiempo real los kilogramos totales movilizados (ida + retorno), el capital total rescatado y la eficiencia de viaje redondo. "
+                           "Al presionar <i>[Confirmar y Emitir Ambas Guías]</i>, el motor ejecuta una única transacción atómica multi-lote en PostgreSQL "
+                           "preservando de forma estricta los identificadores originales de lote para garantizar trazabilidad continua.", bullet_style))
 
     story.append(PageBreak())
 
     # =========================================================================
-    # SECCIÓN 7: PESTAÑA 5 - CONTROL FORMAL DE MERMAS (INACAP 4.5%)
+    # SECCIÓN 7: PESTAÑA 5 - CONTROL FORMAL DE MERMAS Y CAUSA RAÍZ (ETAPA 2)
     # =========================================================================
-    story.append(Paragraph("7. Módulo 5: Control de Mermas y Bajas Formales (Protocolo Anti-Pérdidas)", h1_style))
+    story.append(Paragraph("7. Módulo 5: Control Formal de Mermas y Causa Raíz Tipificada (Etapa 2)", h1_style))
     story.append(Paragraph(
         "<b>Norma Obligatoria de la Cadena:</b> Ningún alimento puede ser desechado o descartado en cocina sin emitir "
-        "previamente el <i>Acta de Baja por Merma</i> en este módulo. Esto erradica el descarte indiscriminado y el robo hormiga.",
+        "previamente el <i>Acta de Baja por Merma</i>. Cada descarte debe clasificar de manera obligatoria en una de las "
+        "<b>4 Causas Raíz Oficiales</b> para auditoría sanitaria y control financiero de pérdidas:",
         body_style
     ))
 
-    # Motivos de merma
+    # Motivos de merma oficiales Etapa 2
     motivos_data = [
-        [Paragraph("<b>Motivo Tipificado</b>", body_style), Paragraph("<b>Descripción y Responsabilidad</b>", body_style)],
-        [Paragraph("<code>Caducidad / Vencimiento</code>", body_style), Paragraph("Lote superó su vida útil sin ser transformado. Requiere justificación de compras.", body_style)],
-        [Paragraph("<code>Quiebre de Cadena de Frío</code>", body_style), Paragraph("Falla en cámaras o temperatura > 4°C comprobada en controles internos.", body_style)],
-        [Paragraph("<code>Error de Manipulación / Cocción</code>", body_style), Paragraph("Quemado, derrame o mala porción en línea de preparación de cocina.", body_style)],
-        [Paragraph("<code>Contaminación Cruzada</code>", body_style), Paragraph("Contacto con alérgenos o agentes no aptos para consumo humano (descarte preventivo).", body_style)],
-        [Paragraph("<code>Merma Natural Excesiva</code>", body_style), Paragraph("Pérdida por desposte o desviscerado por sobre el estándar fijado en receta.", body_style)]
+        [Paragraph("<b>Causa Raíz Tipificada (Oficial)</b>", body_style), Paragraph("<b>Descripción Técnica y Plan de Mitigación</b>", body_style)],
+        [Paragraph("<font color='#0284c7'><b>Ruptura de cadena de frío en cocina</b></font>", body_style), Paragraph("Temperatura registrada > 5.0 °C por falla eléctrica, desconexión o mal cierre de visicoolers/cámaras. Requiere revisión técnica de refrigeración.", body_style)],
+        [Paragraph("<font color='#e63946'><b>Vencimiento de fecha límite FEFO</b></font>", body_style), Paragraph("Lote superó su fecha límite de aptitud sin ser elaborado. Exige auditoría a compras y aplicación estricta del Plan de Choque en carta.", body_style)],
+        [Paragraph("<font color='#f59e0b'><b>Deterioro organoléptico en recepción</b></font>", body_style), Paragraph("Textura, color u olor no conforme detectado al abrir empaque primario. Requiere notificación formal y reclamo a proveedor.", body_style)],
+        [Paragraph("<font color='#8b5cf6'><b>Manipulación / Error de porcionado</b></font>", body_style), Paragraph("Derrame, sobrecocción, corte defectuoso o contaminación cruzada en línea de producción. Exige reinducción del personal de cocina.", body_style)]
     ]
-    t_motivos = Table(motivos_data, colWidths=[160, 340])
+    t_motivos = Table(motivos_data, colWidths=[170, 330])
     t_motivos.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#fee2e2")),
         ('GRID', (0, 0), (-1, -1), 0.5, c_border),
@@ -410,8 +423,9 @@ def generar_manual():
     story.append(t_motivos)
     story.append(Spacer(1, 8))
     story.append(Paragraph(
-        "<b>Resultado Inmediato:</b> La aplicación calcula al instante la <b>Pérdida Monetaria en CLP</b> multiplicando la cantidad "
-        "descartada por el costo de factura exacto del lote, descuenta las existencias de bodega y genera el comprobante digital con folio auditado.",
+        "<b>Auditoría y Estadísticas Ejecutivas:</b> La pestaña incluye un gráfico Donut de Apache ECharts y una "
+        "<b>Matriz Cuantitativa de Pérdidas</b> que cuantifica el porcentaje de impacto de cada causa raíz y permite "
+        "exportar el reporte en formato CSV para los informes de gerencia e INACAP.",
         body_style
     ))
 
