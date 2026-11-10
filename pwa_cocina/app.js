@@ -21,6 +21,16 @@ dbLocal.version(1).stores({
   historial_sync: 'id_evento, fecha_local, fecha_sync'
 });
 
+dbLocal.version(2).stores({
+  config: 'clave',
+  recetas: 'id_receta, categoria, nombre',
+  stock_lotes: 'id_lote, id_producto, fecha_vencimiento',
+  outbox_pendientes: 'id_evento, tipo_evento, fecha_local, estado',
+  historial_sync: 'id_evento, fecha_local, fecha_sync',
+  proveedores: 'id_proveedor, nombre',
+  productos: 'id_producto, nombre'
+});
+
 // 2. ESTADO GLOBAL DE LA APLICACIÓN
 const state = {
   idLocal: 1,
@@ -30,7 +40,10 @@ const state = {
   recetasList: [],
   categoriaActiva: 'TODAS',
   simulacionOfflineForzada: false,
-  isSyncing: false
+  isSyncing: false,
+  proveedoresList: [],
+  productosList: [],
+  stockDisponiblePorProducto: {}
 };
 
 // 3. REGISTRO DEL SERVICE WORKER (CERO INSTALACIÓN / APERTURA OFFLINE)
@@ -106,9 +119,21 @@ const app = {
         await dbLocal.stock_lotes.clear();
         await dbLocal.stock_lotes.bulkPut(data.stock_fefo);
 
+        // Guardar proveedores y productos para recepción offline
+        if (data.proveedores && data.proveedores.length > 0) {
+          await dbLocal.proveedores.clear();
+          await dbLocal.proveedores.bulkPut(data.proveedores);
+          state.proveedoresList = data.proveedores;
+        }
+
+        if (data.productos && data.productos.length > 0) {
+          await dbLocal.productos.clear();
+          await dbLocal.productos.bulkPut(data.productos);
+          state.productosList = data.productos;
+        }
+
         state.recetasList = data.recetas;
-        this.renderMenu();
-        this.renderSelectorMerma(data.stock_fefo);
+        await this.actualizarStockLocal();
         this.mostrarToast('✅ Datos Sincronizados', `Recetas: ${data.total_recetas} • Lotes: ${data.total_lotes_disponibles}`, 'success');
         return;
       } catch (err) {
@@ -119,6 +144,8 @@ const app = {
     // MODO OFFLINE / FALLBACK A INDEXEDDB LOCAL
     const recetasLocales = await dbLocal.recetas.toArray();
     const stockLocal = await dbLocal.stock_lotes.toArray();
+    state.proveedoresList = await dbLocal.proveedores.toArray();
+    state.productosList = await dbLocal.productos.toArray();
     const cfgNombre = await dbLocal.config.get('nombre_local');
     const cfgSnap = await dbLocal.config.get('timestamp_snapshot');
 
@@ -128,8 +155,7 @@ const app = {
 
     if (recetasLocales.length > 0) {
       state.recetasList = recetasLocales;
-      this.renderMenu();
-      this.renderSelectorMerma(stockLocal);
+      await this.actualizarStockLocal();
       this.mostrarToast('📦 Modo Autónomo', 'Cargado desde caché local (IndexedDB)', 'warning');
     } else {
       document.getElementById('grid-platos').innerHTML = `
@@ -228,6 +254,7 @@ const app = {
 
     // 4. Limpiar comanda y actualizar UI de inmediato (Optimistic UI)
     this.limpiarComanda();
+    await this.actualizarStockLocal();
     await this.actualizarContadorOutbox();
     this.mostrarToast('⚡ Despacho Local Exitoso', `Stock FEFO descontado en ${deltaMs} ms (UUID: ${idEvento.substring(0, 8)})`, 'success');
 
@@ -312,7 +339,55 @@ const app = {
         btnTraspasos.classList.remove('opacity-40', 'cursor-not-allowed', 'border-red-800');
         btnTraspasos.title = 'Traspaso a otra sucursal';
       }
+      this.evaluarVisibilidadRecepcion();
     });
+  },
+
+  // REGLA OPCIÓN C (MODO CONDICIONAL):
+  // El botón de recepción solo es visible ante CORTE DE RED o QUIEBRE DE STOCK.
+  evaluarVisibilidadRecepcion() {
+    const isOffline = !navigator.onLine || state.simulacionOfflineForzada;
+    const btnRecepcion = document.getElementById('btn-recepcion');
+    if (!btnRecepcion) return;
+
+    // Verificar si hay algún quiebre de stock en los ingredientes de las recetas
+    let hayQuiebre = false;
+    let nombreInsumoQuebrado = '';
+    if (state.recetasList && state.recetasList.length > 0) {
+      for (const r of state.recetasList) {
+        if (r.ingredientes) {
+          for (const ing of r.ingredientes) {
+            const disponible = state.stockDisponiblePorProducto[ing.id_producto] || 0;
+            if (disponible < ing.cantidad_kg) {
+              hayQuiebre = true;
+              nombreInsumoQuebrado = ing.nombre;
+              break;
+            }
+          }
+        }
+        if (hayQuiebre) break;
+      }
+    }
+
+    if (isOffline || hayQuiebre) {
+      btnRecepcion.classList.remove('hidden');
+      if (isOffline) {
+        btnRecepcion.innerHTML = `
+          <span class="text-base animate-pulse">📥</span>
+          <span>Recepción de Emergencia (Corte de Red)</span>
+        `;
+        btnRecepcion.className = 'w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-2.5 px-3 rounded-xl shadow border border-emerald-400/60 flex items-center justify-center space-x-2 text-xs transition ring-2 ring-emerald-500/50';
+      } else {
+        btnRecepcion.innerHTML = `
+          <span class="text-base">📥</span>
+          <span>Reponer Insumo en Quiebre (${nombreInsumoQuebrado})</span>
+        `;
+        btnRecepcion.className = 'w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-2.5 px-3 rounded-xl shadow border border-yellow-400/60 flex items-center justify-center space-x-2 text-xs transition';
+      }
+    } else {
+      // EN LÍNEA NORMAL Y CON STOCK SUFICIENTE: Se oculta para preservar el flujo administrativo formal
+      btnRecepcion.classList.add('hidden');
+    }
   },
 
   actualizarSemaforo(tipo, texto) {
@@ -359,6 +434,20 @@ const app = {
   // ----------------------------------------------------------------------------
   // GESTIÓN DE LA INTERFAZ: MENÚ DE PLATOS Y COMANDAS
   // ----------------------------------------------------------------------------
+  async actualizarStockLocal() {
+    const lotes = await dbLocal.stock_lotes.toArray();
+    const map = {};
+    for (const l of lotes) {
+      if (l.cantidad > 0) {
+        map[l.id_producto] = (map[l.id_producto] || 0) + l.cantidad;
+      }
+    }
+    state.stockDisponiblePorProducto = map;
+    this.renderMenu();
+    this.renderSelectorMerma(lotes);
+    this.evaluarVisibilidadRecepcion();
+  },
+
   renderMenu() {
     const grid = document.getElementById('grid-platos');
     const categoria = state.categoriaActiva;
@@ -374,12 +463,55 @@ const app = {
     grid.innerHTML = filtrados.map(r => {
       const cant = state.comandaActiva[r.id_receta] || 0;
       const numIng = r.ingredientes ? r.ingredientes.length : 0;
+
+      // Evaluar si hay quiebre de stock en algún ingrediente
+      let hayQuiebre = false;
+      let ingredienteQuebrado = null;
+      let porcionesEstimadas = 9999;
+
+      if (r.ingredientes && r.ingredientes.length > 0) {
+        for (const ing of r.ingredientes) {
+          const disponible = state.stockDisponiblePorProducto[ing.id_producto] || 0;
+          const porcionesIng = Math.floor(disponible / ing.cantidad_kg);
+          if (porcionesIng < porcionesEstimadas) {
+            porcionesEstimadas = porcionesIng;
+          }
+          if (disponible < ing.cantidad_kg) {
+            hayQuiebre = true;
+            ingredienteQuebrado = ing;
+          }
+        }
+      }
+      if (porcionesEstimadas === 9999) porcionesEstimadas = 0;
+
+      if (hayQuiebre) {
+        return `
+          <div class="card-plato bg-gray-900 border border-red-800/70 bg-red-950/20 rounded-xl p-3 flex flex-col justify-between shadow hover:border-red-600 transition">
+            <div>
+              <div class="flex justify-between items-start">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-red-400">${r.categoria}</span>
+                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-900/90 text-red-200">⚠️ Quiebre</span>
+              </div>
+              <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
+              <p class="text-xs text-red-400 mt-1 font-semibold">Falta: ${ingredienteQuebrado.nombre}</p>
+            </div>
+
+            <div class="mt-3 pt-2 border-t border-gray-800 flex items-center justify-between">
+              <button onclick="event.stopPropagation(); app.abrirModalRecepcion(${ingredienteQuebrado.id_producto})" class="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-1.5 px-2 rounded-lg text-xs flex items-center justify-center space-x-1 shadow transition">
+                <span>📥</span>
+                <span>Recibir ${ingredienteQuebrado.nombre}</span>
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
       return `
         <div class="card-plato bg-gray-900 border ${cant > 0 ? 'border-red-500 ring-1 ring-red-500' : 'border-gray-800'} rounded-xl p-3 flex flex-col justify-between shadow hover:border-gray-700 cursor-pointer">
           <div>
             <div class="flex justify-between items-start">
               <span class="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-red-400">${r.categoria}</span>
-              <span class="text-xs text-gray-400 font-medium">⏱️ ${r.tiempo_min}m</span>
+              <span class="text-[10px] text-green-400 font-semibold px-1.5 py-0.5 rounded bg-gray-800/80">Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}</span>
             </div>
             <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
             <p class="text-xs text-gray-400 mt-1">${numIng} insumos con FEFO</p>
@@ -525,9 +657,198 @@ const app = {
     });
 
     this.cerrarModalMerma();
+    await this.actualizarStockLocal();
     await this.actualizarContadorOutbox();
     this.mostrarToast('⚠️ Merma Registrada', `${cant} descontados localmente (UUID: ${idEvento.substring(0, 8)})`, 'warning');
 
+    if (navigator.onLine && !state.simulacionOfflineForzada) {
+      this.sincronizarColaBackground();
+    }
+  },
+
+  // ----------------------------------------------------------------------------
+  // RECEPCIÓN DE MERCADERÍAS (RESOLUCIÓN DE QUIEBRE DE STOCK OFFLINE)
+  // ----------------------------------------------------------------------------
+  abrirModalRecepcion(idProductoPreseleccionado = null) {
+    const selProd = document.getElementById('sel-recepcion-producto');
+    const selProv = document.getElementById('sel-recepcion-proveedor');
+
+    // Poblar selector de productos desde catálogo maestro precargado
+    if (state.productosList && state.productosList.length > 0) {
+      selProd.innerHTML = state.productosList.map(p => `
+        <option value="${p.id_producto}" ${idProductoPreseleccionado === p.id_producto ? 'selected' : ''}>
+          ${p.nombre} (${p.unidad_medida})
+        </option>
+      `).join('');
+    } else {
+      selProd.innerHTML = '<option value="1">Corvina fresca (kg)</option><option value="2">Reineta fresca (kg)</option>';
+    }
+
+    // Poblar selector de proveedores
+    if (state.proveedoresList && state.proveedoresList.length > 0) {
+      selProv.innerHTML = state.proveedoresList.map(pv => `
+        <option value="${pv.id_proveedor}">${pv.nombre} ${pv.rut ? '(' + pv.rut + ')' : ''}</option>
+      `).join('');
+    } else {
+      selProv.innerHTML = '<option value="1">Pesquera del Pacífico SpA</option><option value="2">Distribuidora La Vega Central</option>';
+    }
+
+    // Configurar fecha de vencimiento por defecto (hoy + 4 días para pesca fresca)
+    const fechaDefecto = new Date();
+    fechaDefecto.setDate(fechaDefecto.getDate() + 4);
+    document.getElementById('inp-recepcion-venc').value = fechaDefecto.toISOString().split('T')[0];
+
+    // Número de guía aleatorio realista si está vacío
+    const inpDoc = document.getElementById('inp-recepcion-doc');
+    if (!inpDoc.value || inpDoc.value === 'GD-') {
+      inpDoc.value = `GD-${Math.floor(10000 + Math.random() * 90000)}`;
+    }
+
+    // Autogenerar lote si está vacío
+    this.generarCodigoLoteAuto();
+
+    // Actualizar unidad
+    this.onProductoRecepcionChange(selProd.value);
+
+    // Evaluar temperatura inicial
+    this.evaluarTemperaturaRecepcion(document.getElementById('inp-recepcion-temp').value);
+
+    document.getElementById('modal-recepcion').classList.remove('hidden');
+  },
+
+  cerrarModalRecepcion() {
+    document.getElementById('modal-recepcion').classList.add('hidden');
+  },
+
+  onProductoRecepcionChange(idProdStr) {
+    const idProd = parseInt(idProdStr, 10);
+    const prod = state.productosList.find(p => p.id_producto === idProd);
+    const badge = document.getElementById('txt-recepcion-unidad-badge');
+    if (prod && badge) {
+      badge.textContent = `Unidad: ${prod.unidad_medida}`;
+    }
+  },
+
+  sumarCantidadRecepcion(delta) {
+    const inp = document.getElementById('inp-recepcion-cant');
+    const actual = parseFloat(inp.value) || 0;
+    inp.value = Math.max(0.1, actual + delta).toFixed(1);
+  },
+
+  generarCodigoLoteAuto() {
+    const d = new Date();
+    const fecha = d.toISOString().slice(2, 10).replace(/-/g, '');
+    const rand = Math.floor(100 + Math.random() * 900);
+    document.getElementById('inp-recepcion-lote').value = `LOT-${fecha}-${rand}`;
+  },
+
+  evaluarTemperaturaRecepcion(temp) {
+    const val = parseFloat(temp);
+    const badge = document.getElementById('badge-temp-alerta');
+    if (isNaN(val) || !badge) return;
+    if (val <= 4.0) {
+      badge.textContent = '❄️ Frío Conforme (≤ 4°C)';
+      badge.className = 'text-[10px] text-green-400 font-bold';
+    } else if (val <= 6.0) {
+      badge.textContent = '⚠️ Límite Crítico (4-6°C)';
+      badge.className = 'text-[10px] text-yellow-400 font-bold';
+    } else {
+      badge.textContent = '🚫 Peligro HACCP (> 6°C)';
+      badge.className = 'text-[10px] text-red-400 font-bold';
+    }
+  },
+
+  async guardarRecepcionMercaderia() {
+    const selProd = document.getElementById('sel-recepcion-producto');
+    const selProv = document.getElementById('sel-recepcion-proveedor');
+    const idProd = parseInt(selProd.value, 10);
+    const idProv = parseInt(selProv.value, 10);
+    const cant = parseFloat(document.getElementById('inp-recepcion-cant').value);
+    const numDoc = document.getElementById('inp-recepcion-doc').value.trim();
+    let codigoLote = document.getElementById('inp-recepcion-lote').value.trim();
+    const fechaVenc = document.getElementById('inp-recepcion-venc').value;
+    const tempRecepcion = parseFloat(document.getElementById('inp-recepcion-temp').value) || 2.0;
+    const obs = document.getElementById('inp-recepcion-obs').value.trim();
+
+    if (!idProd || isNaN(cant) || cant <= 0) {
+      alert('Por favor especifica un producto y una cantidad mayor a 0.');
+      return;
+    }
+
+    if (!codigoLote) {
+      this.generarCodigoLoteAuto();
+      codigoLote = document.getElementById('inp-recepcion-lote').value;
+    }
+
+    const prodObj = state.productosList.find(p => p.id_producto === idProd);
+    const nombreProd = prodObj ? prodObj.nombre : `Insumo #${idProd}`;
+    const unidadMedida = prodObj ? prodObj.unidad_medida : 'kg';
+    const provObj = state.proveedoresList.find(pv => pv.id_proveedor === idProv);
+    const nombreProv = provObj ? provObj.nombre : `Proveedor #${idProv}`;
+
+    const tInicio = performance.now();
+
+    // 1. Crear el nuevo lote en la base IndexedDB local con ID provisorio
+    const idLoteProvisorio = -Math.floor(Date.now() / 1000);
+    const fechaHoy = new Date().toISOString().split('T')[0];
+
+    const nuevoLote = {
+      id_lote: idLoteProvisorio,
+      codigo_lote: codigoLote,
+      id_producto: idProd,
+      producto: nombreProd,
+      unidad_medida: unidadMedida,
+      cantidad: cant,
+      fecha_vencimiento: fechaVenc || fechaHoy,
+      fecha_recepcion: fechaHoy,
+      temperatura_recepcion: tempRecepcion
+    };
+
+    await dbLocal.stock_lotes.put(nuevoLote);
+
+    // 2. Generar el evento inmutable para el Outbox
+    const idEvento = crypto.randomUUID();
+    const evento = {
+      id_evento: idEvento,
+      tipo_evento: 'RECEPCION_MERCADERIA_OFFLINE',
+      fecha_local: new Date().toISOString(),
+      estado: 'PENDIENTE',
+      payload: {
+        id_local: state.idLocal,
+        id_proveedor: idProv,
+        nombre_proveedor: nombreProv,
+        id_producto: idProd,
+        nombre_producto: nombreProd,
+        unidad_medida: unidadMedida,
+        cantidad: cant,
+        codigo_lote_proveedor: codigoLote,
+        fecha_vencimiento: fechaVenc || fechaHoy,
+        fecha_recepcion: fechaHoy,
+        temperatura_recepcion: tempRecepcion,
+        tipo_documento: 'GUIA_DESPACHO',
+        numero_documento: numDoc || `GD-OFF-${idEvento.substring(0, 6)}`,
+        id_lote_provisorio: idLoteProvisorio,
+        observaciones: obs
+      }
+    };
+
+    await dbLocal.outbox_pendientes.put(evento);
+
+    const tFin = performance.now();
+    const deltaMs = (tFin - tInicio).toFixed(1);
+
+    // 3. Cerrar modal y refrescar el estado del KDS
+    this.cerrarModalRecepcion();
+    await this.actualizarStockLocal();
+    await this.actualizarContadorOutbox();
+
+    this.mostrarToast(
+      '📥 Insumo Ingresado al Stock',
+      `+${cant} ${unidadMedida} de ${nombreProd} listos para cocinar (${deltaMs} ms)`,
+      'success'
+    );
+
+    // 4. Si hay red, sincronizar en background sin bloquear
     if (navigator.onLine && !state.simulacionOfflineForzada) {
       this.sincronizarColaBackground();
     }
@@ -556,16 +877,20 @@ const app = {
         let html = '';
         if (items.length > 0) {
           html += `<h4 class="text-xs font-bold uppercase text-yellow-400 mb-2">Pendientes de Envío (${items.length}):</h4>`;
-          html += items.map(it => `
-            <div class="bg-gray-800 border border-yellow-700/50 p-2.5 rounded-lg text-xs space-y-1">
-              <div class="flex justify-between items-center">
-                <span class="font-bold text-white">${it.tipo_evento}</span>
-                <span class="text-yellow-400 font-mono text-[10px]">UUID: ${it.id_evento}</span>
+          html += items.map(it => {
+            const esRecepcion = it.tipo_evento === 'RECEPCION_MERCADERIA_OFFLINE';
+            return `
+              <div class="bg-gray-800 border ${esRecepcion ? 'border-emerald-600/70 bg-emerald-950/20' : 'border-yellow-700/50'} p-2.5 rounded-lg text-xs space-y-1">
+                <div class="flex justify-between items-center">
+                  <span class="font-bold ${esRecepcion ? 'text-emerald-400' : 'text-white'}">${it.tipo_evento}</span>
+                  <span class="${esRecepcion ? 'text-emerald-300' : 'text-yellow-400'} font-mono text-[10px]">UUID: ${it.id_evento.substring(0, 8)}...</span>
+                </div>
+                ${esRecepcion ? `<p class="text-emerald-300 font-semibold text-[11px]">📦 +${it.payload.cantidad} ${it.payload.unidad_medida || 'kg'} de ${it.payload.nombre_producto} (${it.payload.nombre_proveedor || 'Proveedor'}) • Doc: ${it.payload.numero_documento}</p>` : ''}
+                <p class="text-gray-300 text-[11px]">${it.payload.observaciones || 'Sin observaciones'}</p>
+                <p class="text-gray-500 text-[10px]">Generado local: ${new Date(it.fecha_local).toLocaleTimeString()}</p>
               </div>
-              <p class="text-gray-300 text-[11px]">${it.payload.observaciones || 'Sin observaciones'}</p>
-              <p class="text-gray-500 text-[10px]">Generado local: ${new Date(it.fecha_local).toLocaleTimeString()}</p>
-            </div>
-          `).join('');
+            `;
+          }).join('');
         }
 
         if (historial.length > 0) {

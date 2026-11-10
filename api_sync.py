@@ -11,7 +11,7 @@ Descripción:
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -45,9 +45,9 @@ app.add_middleware(
 # ==============================================================================
 class EventoSyncItem(BaseModel):
     id_evento: str = Field(..., description="UUID v4 único generado por el cliente local")
-    tipo_evento: str = Field(..., description="PRODUCCION_RECETAS | SALIDA_COCINA_MANUAL | MERMA")
+    tipo_evento: str = Field(..., description="PRODUCCION_RECETAS | SALIDA_COCINA_MANUAL | MERMA | RECEPCION_MERCADERIA_OFFLINE")
     fecha_local: str = Field(..., description="Fecha/hora ISO 8601 del momento de la acción física")
-    payload: Dict[str, Any] = Field(..., description="Datos detallados de la orden o consumo")
+    payload: Dict[str, Any] = Field(..., description="Datos detallados de la orden, consumo o recepción")
 
 
 class LoteSyncRequest(BaseModel):
@@ -153,6 +153,28 @@ def get_bootstrap_local(id_local: int):
             "fecha_recepcion": str(r["fecha_recepcion"]),
         })
 
+    # 4. Cargar proveedores activos para recepciones offline en cocina
+    df_prov = db.load_proveedores(solo_activos=True)
+    proveedores = [
+        {
+            "id_proveedor": int(row["id_proveedor"]),
+            "nombre": str(row["nombre"]),
+            "rut": str(row["rut"] or ""),
+        }
+        for _, row in df_prov.iterrows()
+    ]
+
+    # 5. Cargar catálogo maestro de productos para recepciones offline
+    df_prod = db.load_productos(solo_activos=True)
+    productos = [
+        {
+            "id_producto": int(row["id_producto"]),
+            "nombre": str(row["nombre"]),
+            "unidad_medida": str(row["unidad_medida"]),
+        }
+        for _, row in df_prod.iterrows()
+    ]
+
     return {
         "id_local": id_local,
         "nombre_local": nombre_local,
@@ -161,6 +183,8 @@ def get_bootstrap_local(id_local: int):
         "total_lotes_disponibles": len(stock_lotes),
         "recetas": list(recetas_dict.values()),
         "stock_fefo": stock_lotes,
+        "proveedores": proveedores,
+        "productos": productos,
     }
 
 
@@ -290,6 +314,67 @@ def sync_batch(lote: LoteSyncRequest):
                             """
                         ),
                         {"id_evento": ev_uuid, "res": json.dumps({"status": "exito"})},
+                    )
+                procesados += 1
+
+            elif ev.tipo_evento == "RECEPCION_MERCADERIA_OFFLINE":
+                id_proveedor = int(ev.payload["id_proveedor"])
+                id_producto = int(ev.payload["id_producto"])
+                cantidad = float(ev.payload["cantidad"])
+                codigo_lote = str(ev.payload.get("codigo_lote_proveedor", f"LOTE-OFFLINE-{ev_uuid[:6]}"))
+                
+                fecha_venc_raw = ev.payload.get("fecha_vencimiento")
+                if fecha_venc_raw:
+                    try:
+                        fecha_venc = datetime.strptime(fecha_venc_raw[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        fecha_venc = datetime.now().date() + timedelta(days=5)
+                else:
+                    fecha_venc = datetime.now().date() + timedelta(days=5)
+
+                fecha_rec_raw = ev.payload.get("fecha_recepcion")
+                if fecha_rec_raw:
+                    try:
+                        fecha_rec = datetime.strptime(fecha_rec_raw[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        fecha_rec = datetime.now().date()
+                else:
+                    fecha_rec = datetime.now().date()
+
+                temperatura = float(ev.payload.get("temperatura_recepcion", 2.0))
+                tipo_doc = str(ev.payload.get("tipo_documento", "GUIA_DESPACHO"))
+                num_doc = str(ev.payload.get("numero_documento", f"DOC-OFF-{ev_uuid[:8]}"))
+                obs = f"Sync Offline KDS [{ev_uuid[:8]}]: {ev.payload.get('observaciones', '')}".strip()
+
+                resultado_recepcion = db.registrar_recepcion_compra(
+                    id_proveedor=id_proveedor,
+                    id_local_receptor=lote.id_local,
+                    tipo_documento=tipo_doc,
+                    numero_documento=num_doc,
+                    fecha_compra=fecha_rec,
+                    fecha_recepcion=fecha_rec,
+                    id_producto=id_producto,
+                    cantidad=cantidad,
+                    codigo_lote_proveedor=codigo_lote,
+                    fecha_vencimiento=fecha_venc,
+                    temperatura_recepcion=temperatura,
+                    observaciones=obs,
+                )
+
+                with db.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE cola_eventos_sync
+                            SET procesado = TRUE,
+                                resultado_proceso = :res
+                            WHERE id_evento = :id_evento
+                            """
+                        ),
+                        {
+                            "id_evento": ev_uuid,
+                            "res": json.dumps({"status": "exito", "recepcion": resultado_recepcion}),
+                        },
                     )
                 procesados += 1
 
