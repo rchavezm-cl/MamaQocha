@@ -2024,8 +2024,44 @@ with tab_cocina:
             key="sel_local_cocina",
         )
 
-    subtab_recetas, subtab_lote_manual = st.tabs(
-        ["📋 Producción por Recetas (Comanda / Turno)", "📦 Salida Manual por Lote Individual"]
+    # --------------------------------------------------------------------------
+    # BANNER DE ACCESO A TERMINAL DE COCINA AUTÓNOMA (PWA OFFLINE-READY)
+    # --------------------------------------------------------------------------
+    with st.container(border=True):
+        col_pwa_icon, col_pwa_txt, col_pwa_btn = st.columns([1, 6, 3])
+        with col_pwa_icon:
+            st.markdown("<h2 style='text-align: center; margin: 0;'>🛡️</h2>", unsafe_allow_html=True)
+        with col_pwa_txt:
+            st.markdown("**Terminal de Cocina Autónoma (PWA Offline-Ready)**")
+            st.caption(
+                "Diseñada para tablets o pantallas de cocina con **tolerancia a caídas de internet**. "
+                "Cálculo FEFO y comandas ultrarrápidas (< 5 ms) en el navegador con sincronización automática en segundo plano."
+            )
+        with col_pwa_btn:
+            api_base_url = "http://localhost:8000"
+            try:
+                if hasattr(st, "secrets") and "API_URL" in st.secrets:
+                    api_base_url = st.secrets["API_URL"].rstrip("/")
+            except Exception:
+                pass
+            api_base_url = os.getenv("API_URL", api_base_url).rstrip("/")
+            url_terminal = f"{api_base_url}/cocina?local={local_cocina_id}"
+            
+            st.link_button(
+                "🚀 Abrir Terminal KDS",
+                url=url_terminal,
+                type="primary",
+                use_container_width=True,
+                help="Abre la pantalla táctil de cocina en una nueva pestaña"
+            )
+            st.caption(f"📍 Conexión: `{api_base_url}`")
+
+    subtab_recetas, subtab_lote_manual, subtab_audit_offline = st.tabs(
+        [
+            "📋 Producción por Recetas (Comanda / Turno)", 
+            "📦 Salida Manual por Lote Individual",
+            "🛰️ Bitácora de Sincronización Offline (Outbox)"
+        ]
     )
 
     # --------------------------------------------------------------------------
@@ -2315,6 +2351,50 @@ with tab_cocina:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar salida a cocina: {e}")
+
+    # --------------------------------------------------------------------------
+    # SUBTAB: BITÁCORA DE SINCRONIZACIÓN OFFLINE (OUTBOX AUDIT)
+    # --------------------------------------------------------------------------
+    with subtab_audit_offline:
+        st.markdown("#### 🛰️ Bitácora de Sincronización de Terminales Offline (Outbox Pattern)")
+        st.caption(
+            "Auditoría técnica de transacciones originadas de forma autónoma en las pantallas de cocina (PWA). "
+            "Garantiza trazabilidad forense registrando la fecha/hora física en cocina, la fecha de recepción en la nube y el UUID de idempotencia."
+        )
+
+        df_sync = db.load_cola_eventos_sync(id_local=local_cocina_id if id_local_activo else None, limit=50)
+
+        if df_sync.empty:
+            st.info(
+                "ℹ️ Aún no hay registros en la cola de sincronización. "
+                "Abre la **Terminal KDS**, realiza un despacho de recetas o merma, y los eventos aparecerán auditados aquí en tiempo real."
+            )
+        else:
+            col_k1, col_k2, col_k3 = st.columns(3)
+            with col_k1:
+                st.metric("Total Eventos Recibidos", len(df_sync))
+            with col_k2:
+                desfase_medio = df_sync["segundos_desfase"].mean() if "segundos_desfase" in df_sync.columns else 0.0
+                st.metric("Desfase Medio de Contingencia", f"{desfase_medio:.1f} s")
+            with col_k3:
+                proc_count = df_sync["procesado"].sum() if "procesado" in df_sync.columns else len(df_sync)
+                st.metric("Integrados a PostgreSQL Neon", f"{proc_count} / {len(df_sync)} ✅")
+
+            st.dataframe(
+                df_sync,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id_evento": st.column_config.TextColumn("UUID Origen", width="medium"),
+                    "local": "Sucursal",
+                    "tipo_evento": "Tipo de Evento",
+                    "fecha_evento_local": st.column_config.DatetimeColumn("Hora en Cocina", format="DD/MM/YYYY HH:mm:ss"),
+                    "fecha_recepcion_nube": st.column_config.DatetimeColumn("Llegada a Nube Neon", format="DD/MM/YYYY HH:mm:ss"),
+                    "segundos_desfase": st.column_config.NumberColumn("Desfase (s)", format="%.1f s"),
+                    "procesado": st.column_config.CheckboxColumn("Procesado"),
+                    "observaciones": "Observaciones de Origen",
+                }
+            )
 
 # ==============================================================================
 # TAB 4: TRASPASOS ENTRE LOCALES

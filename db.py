@@ -1604,6 +1604,40 @@ def consumir_produccion_recetas(
         }
 
 
+def load_cola_eventos_sync(id_local: Optional[int] = None, limit: int = 30) -> pd.DataFrame:
+    """
+    Carga la bitácora de auditoría de eventos recibidos desde las terminales de cocina (PWA / Offline).
+    Muestra UUID, fecha local, fecha de recepción en la nube y latencia de sincronización.
+    """
+    try:
+        where_clause = "WHERE c.id_local = :id_local" if id_local else ""
+        query = text(
+            f"""
+            SELECT 
+                c.id_evento,
+                loc.nombre AS local,
+                c.tipo_evento,
+                c.fecha_evento_local,
+                c.fecha_recepcion_nube,
+                ROUND(EXTRACT(EPOCH FROM (c.fecha_recepcion_nube - c.fecha_evento_local))::numeric, 1) AS segundos_desfase,
+                c.procesado,
+                COALESCE(c.payload->>'observaciones', 'Sin observaciones') AS observaciones
+            FROM cola_eventos_sync c
+            JOIN locales loc ON c.id_local = loc.id_local
+            {where_clause}
+            ORDER BY c.fecha_recepcion_nube DESC
+            LIMIT :limit
+            """
+        )
+        with engine.connect() as conn:
+            params = {"limit": limit}
+            if id_local:
+                params["id_local"] = id_local
+            return pd.read_sql(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
+
+
 def test_connection():
     """Función de prueba de solo lectura para verificar la base de datos."""
     try:
