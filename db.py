@@ -470,6 +470,7 @@ def load_trazabilidad_lote(id_lote: int) -> Dict[str, Any]:
             c.numero_documento AS documento_compra,
             c.fecha_compra,
             loc_rec.nombre AS local_receptor_original,
+            COALESCE(u_rec.nombre, 'Operador Central') AS recibido_por,
             dc.costo_unitario,
             dc.observaciones AS obs_detalle,
             c.observaciones AS obs_compra
@@ -479,6 +480,7 @@ def load_trazabilidad_lote(id_lote: int) -> Dict[str, Any]:
         JOIN compras AS c ON c.id_compra = dc.id_compra
         JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
         JOIN locales AS loc_rec ON loc_rec.id_local = c.id_local_receptor
+        LEFT JOIN usuarios AS u_rec ON u_rec.id_usuario = c.id_usuario_receptor
         WHERE l.id_lote = :id_lote
         """
     )
@@ -509,11 +511,15 @@ def load_trazabilidad_lote(id_lote: int) -> Dict[str, Any]:
             dm.cantidad,
             m.referencia,
             m.observaciones,
-            m.estado
+            m.estado,
+            COALESCE(u_o.nombre, 'Operador Sistema') AS despachado_por,
+            COALESCE(u_d.nombre, '-') AS recibido_por
         FROM detalle_movimiento AS dm
         JOIN movimientos AS m ON m.id_movimiento = dm.id_movimiento
         JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
         LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
+        LEFT JOIN usuarios AS u_o ON u_o.id_usuario = m.id_usuario
+        LEFT JOIN usuarios AS u_d ON u_d.id_usuario = m.id_usuario_recepcion
         WHERE dm.id_lote = :id_lote
         ORDER BY m.fecha_movimiento DESC
         """

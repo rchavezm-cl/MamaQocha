@@ -845,6 +845,7 @@ try:
     locales_df = db.load_locales()
     proveedores_df = db.load_proveedores(solo_activos=True)
     productos_df = db.load_productos(solo_activos=True)
+    usuarios_df = db.load_usuarios(solo_activos=True)
 except SQLAlchemyError as err:
     st.error(
         f"❌ Error al conectar con PostgreSQL: {err}. "
@@ -894,6 +895,48 @@ if id_local_activo:
     st.sidebar.success(f"Sesión activa: **{nombre_local_activo}**")
 else:
     st.sidebar.info("Modo activo: **Consolidado General (5 Locales)**")
+
+
+def get_opciones_usuarios(
+    id_local_filtro: Optional[int] = None,
+    id_default: Optional[int] = None,
+) -> tuple[dict[int, str], int]:
+    """Retorna (dict {id_usuario: etiqueta}, indice_por_defecto) filtrado por local + corporativos."""
+    if usuarios_df.empty:
+        return {}, 0
+
+    if id_local_filtro is not None:
+        df_f = usuarios_df[
+            usuarios_df["id_local"].isna()
+            | (usuarios_df["id_local"] == id_local_filtro)
+        ]
+        if df_f.empty:
+            df_f = usuarios_df
+    else:
+        df_f = usuarios_df
+
+    opciones = {
+        int(row["id_usuario"]): f"{row['nombre']} ({row['rol'].replace('_', ' ').title()})"
+        for _, row in df_f.iterrows()
+    }
+    claves = list(opciones.keys())
+    idx = claves.index(id_default) if (id_default is not None and id_default in claves) else 0
+    return opciones, idx
+
+
+opciones_usr_sesion, _ = get_opciones_usuarios(id_local_activo)
+if opciones_usr_sesion:
+    id_usuario_sesion: Optional[int] = st.sidebar.selectbox(
+        "👤 Operador en Sesión:",
+        options=list(opciones_usr_sesion.keys()),
+        format_func=lambda k: opciones_usr_sesion[k],
+        key="sel_usuario_sesion_sidebar",
+        help="Firma por defecto preseleccionada en recepciones, despachos, cocina y mermas.",
+    )
+    nombre_usuario_sesion = opciones_usr_sesion[id_usuario_sesion]
+else:
+    id_usuario_sesion = None
+    nombre_usuario_sesion = "Operador Central"
 
 st.sidebar.markdown("---")
 
@@ -1868,7 +1911,8 @@ with tab_recepcion:
                 • <strong>Compra Registrada:</strong> #{v_rec['id_compra']} ({v_rec['tipo_doc']} {v_rec['num_doc']})<br>
                 • <strong>Cantidad asignada a stock:</strong> {v_rec['cantidad']:.3f} kg en el local receptor.<br>
                 • <strong>Vencimiento:</strong> {v_rec['vencimiento']}<br>
-                • <strong>Temp. de Ingreso:</strong> {v_rec.get('temperatura', 2.0):.1f} °C (Control Cadena de Frío)
+                • <strong>Temp. de Ingreso:</strong> {v_rec.get('temperatura', 2.0):.1f} °C (Control Cadena de Frío)<br>
+                • <strong>Recepcionado por:</strong> {v_rec.get('responsable', 'Operador Central')}
             </div>
             """,
             unsafe_allow_html=True,
@@ -1910,6 +1954,14 @@ with tab_recepcion:
                     fecha_compra = st.date_input("Fecha de emisión/compra:*", value=date.today())
                 with col_sub_f2:
                     fecha_recepcion = st.date_input("Fecha de recepción física:*", value=date.today())
+
+                opc_usr_rec, idx_usr_rec = get_opciones_usuarios(id_local_activo, id_usuario_sesion)
+                id_usr_receptor = st.selectbox(
+                    "Responsable que recibe en bodega/local:*",
+                    options=list(opc_usr_rec.keys()) if opc_usr_rec else [None],
+                    index=idx_usr_rec,
+                    format_func=lambda k: opc_usr_rec[k] if k is not None else "Operador Central",
+                )
 
             with col_f2:
                 st.markdown("##### 🏷️ 2. Especificación de Materia Prima y Lote")
@@ -1986,6 +2038,7 @@ with tab_recepcion:
                     temperatura_recepcion=float(temperatura_recepcion),
                     costo_unitario=float(costo_unitario) if costo_unitario > 0 else None,
                     observaciones=observaciones.strip() if observaciones.strip() else None,
+                    id_usuario_receptor=int(id_usr_receptor) if id_usr_receptor is not None else None,
                 )
                 st.session_state["voucher_recepcion"] = {
                     "id_lote": resultado["id_lote"],
@@ -1995,6 +2048,7 @@ with tab_recepcion:
                     "cantidad": cantidad,
                     "vencimiento": fecha_vencimiento.strftime('%d-%m-%Y'),
                     "temperatura": float(temperatura_recepcion),
+                    "responsable": opc_usr_rec.get(id_usr_receptor, "Operador Central") if id_usr_receptor else "Operador Central",
                 }
                 st.rerun()
             except SQLAlchemyError as err:
@@ -2085,7 +2139,9 @@ with tab_cocina:
                 col_vm3.metric("Costo Insumos (FEFO)", f"${v_prod['costo_total_insumos']:,.0f}")
                 col_vm4.metric("Margen Bruto", f"${v_prod['margen_bruto']:,.0f}", f"{v_prod['pct_margen']:.1f}%")
 
-                st.markdown(f"**Turno:** `{v_prod['turno']}` | **Movimiento de Inventario:** `#{v_prod['id_movimiento']}`")
+                st.markdown(
+                    f"**Turno:** `{v_prod['turno']}` | **Responsable:** `{v_prod.get('responsable', 'Operador Central')}` | **Movimiento de Inventario:** `#{v_prod['id_movimiento']}`"
+                )
 
                 col_vp_left, col_vp_right = st.columns(2)
                 with col_vp_left:
@@ -2115,7 +2171,7 @@ with tab_cocina:
                 .sort_values(by=["categoria", "receta"])
             )
 
-            col_cf1, col_cf2 = st.columns([1, 2])
+            col_cf1, col_cf2, col_cf3 = st.columns([1.2, 1.2, 1.6])
             with col_cf1:
                 turno_prod = st.selectbox(
                     "Turno de Cocina / Servicio:*",
@@ -2123,6 +2179,15 @@ with tab_cocina:
                     key="sel_turno_produccion",
                 )
             with col_cf2:
+                opc_chef_prod, idx_chef_prod = get_opciones_usuarios(int(local_cocina_id), id_usuario_sesion)
+                id_chef_prod = st.selectbox(
+                    "Chef / Responsable:*",
+                    options=list(opc_chef_prod.keys()) if opc_chef_prod else [None],
+                    index=idx_chef_prod,
+                    format_func=lambda k: opc_chef_prod[k] if k is not None else "Operador Central",
+                    key="sel_chef_produccion",
+                )
+            with col_cf3:
                 obs_prod = st.text_input(
                     "Referencia de la comanda u observaciones:",
                     placeholder="Ej. Comanda salón principal y pedidos delivery",
@@ -2235,7 +2300,9 @@ with tab_cocina:
                             orden_platos=orden_platos,
                             turno=turno_prod,
                             observaciones=obs_prod.strip() or f"Producción comanda {turno_prod}",
+                            id_usuario=int(id_chef_prod) if id_chef_prod is not None else None,
                         )
+                        res_prod["responsable"] = opc_chef_prod.get(id_chef_prod, "Operador Central") if id_chef_prod else "Operador Central"
                         st.session_state["voucher_produccion"] = res_prod
                         st.rerun()
                     except Exception as err:
@@ -2260,7 +2327,8 @@ with tab_cocina:
                     • <strong>Insumo:</strong> {v_coc['producto']} (Lote: <code>{v_coc['lote']}</code>)<br>
                     • <strong>Cantidad consumida:</strong> <code>{v_coc['cantidad']:.3f} {v_coc['unidad']}</code><br>
                     • <strong>Nuevo stock remanente en este local:</strong> <code>{v_coc['nuevo_stock']:.3f} {v_coc['unidad']}</code><br>
-                    • <strong>Referencia:</strong> {v_coc['referencia']}
+                    • <strong>Referencia:</strong> {v_coc['referencia']}<br>
+                    • <strong>Chef / Responsable:</strong> {v_coc.get('responsable', 'Operador Central')}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2310,6 +2378,14 @@ with tab_cocina:
                             "Estación de cocina o partida:",
                             placeholder="Ej. Cevichería, Parrilla, Turno Noche, Menú Almuerzo",
                         )
+                        opc_chef_man, idx_chef_man = get_opciones_usuarios(int(local_cocina_id), id_usuario_sesion)
+                        id_chef_man = st.selectbox(
+                            "Chef / Responsable:*",
+                            options=list(opc_chef_man.keys()) if opc_chef_man else [None],
+                            index=idx_chef_man,
+                            format_func=lambda k: opc_chef_man[k] if k is not None else "Operador Central",
+                            key="sel_chef_manual_cocina",
+                        )
 
                     with col_c2:
                         urgencia_badge = "🔴 Urgente" if dias_rest <= 7 else "🟢 Normal"
@@ -2338,6 +2414,7 @@ with tab_cocina:
                         cantidad=float(cant_cocina),
                         referencia=ref_cocina.strip() or "Salida a cocina",
                         observaciones=obs_cocina.strip() or None,
+                        id_usuario=int(id_chef_man) if id_chef_man is not None else None,
                     )
                     st.session_state["voucher_cocina"] = {
                         "id_movimiento": res_cocina["id_movimiento"],
@@ -2347,6 +2424,7 @@ with tab_cocina:
                         "unidad": unidad_medida,
                         "nuevo_stock": res_cocina["nuevo_stock"],
                         "referencia": ref_cocina.strip() or "Consumo estándar",
+                        "responsable": opc_chef_man.get(id_chef_man, "Operador Central") if id_chef_man else "Operador Central",
                     }
                     st.rerun()
                 except Exception as e:
@@ -2421,6 +2499,7 @@ with tab_traslados:
                         • <strong>Referencia:</strong> <code>{v_ida['referencia']}</code><br>
                         • <strong>Ruta:</strong> <strong>{v_cons['origen']}</strong> ➡️ <strong>{v_cons['destino']}</strong><br>
                         • <strong>Partidas emitidas:</strong> <code>{v_ida['total_partidas']} lotes</code> (<code>{v_ida['total_kg']:.3f} kg</code>)<br>
+                        • <strong>Firmas:</strong> Despacha {v_cons.get('despacha_orig', 'Operador Central')} ➡️ Recibe {v_cons.get('recibe_dest', 'Operador Central')}<br>
                         • <strong>Trazabilidad:</strong> Códigos de lote preservados con éxito.
                     </div>
                     """,
@@ -2436,6 +2515,7 @@ with tab_traslados:
                         • <strong>Referencia:</strong> <code>{v_ret['referencia']}</code><br>
                         • <strong>Ruta:</strong> <strong>{v_cons['destino']}</strong> ➡️ <strong>{v_cons['origen']}</strong><br>
                         • <strong>Partidas retornadas:</strong> <code>{v_ret['total_partidas']} lotes</code> (<code>{v_ret['total_kg']:.3f} kg</code>)<br>
+                        • <strong>Firmas:</strong> Despacha {v_cons.get('recibe_dest', 'Operador Central')} ➡️ Recibe {v_cons.get('despacha_orig', 'Operador Central')}<br>
                         • <strong>Logística de Retorno:</strong> Backhaul completado al 100%.
                     </div>
                     """,
@@ -2454,6 +2534,7 @@ with tab_traslados:
                 • <strong>Cantidad trasladada:</strong> <code>{v_tr['cantidad']:.3f} {v_tr['unidad']}</code><br>
                 • <strong>Nuevo saldo en Origen ({v_tr['origen']}):</strong> <code>{v_tr['nuevo_origen']:.3f} {v_tr['unidad']}</code><br>
                 • <strong>Nuevo saldo en Destino ({v_tr['destino']}):</strong> <code>{v_tr['nuevo_destino']:.3f} {v_tr['unidad']}</code><br>
+                • <strong>Firmas:</strong> Despachó {v_tr.get('despachado_por', 'Operador Central')} ➡️ Recibió {v_tr.get('recibido_por', 'Operador Central')}<br>
                 • <strong>Trazabilidad:</strong> El lote preserva intacto su código de origen en la sucursal receptora.
             </div>
             """,
@@ -2910,6 +2991,26 @@ with tab_traslados:
                 unsafe_allow_html=True,
             )
 
+            col_firma_c1, col_firma_c2 = st.columns(2)
+            with col_firma_c1:
+                opc_orig_cons, idx_orig_cons = get_opciones_usuarios(int(local_traslado_origen_id), id_usuario_sesion)
+                id_usr_orig_cons = st.selectbox(
+                    f"Responsable Origen ({nombre_orig_simple}):*",
+                    options=list(opc_orig_cons.keys()) if opc_orig_cons else [None],
+                    index=idx_orig_cons,
+                    format_func=lambda k: opc_orig_cons[k] if k is not None else "Operador Central",
+                    key="sel_usr_orig_cons",
+                )
+            with col_firma_c2:
+                opc_dest_cons, idx_dest_cons = get_opciones_usuarios(int(local_traslado_destino_id), id_usuario_sesion)
+                id_usr_dest_cons = st.selectbox(
+                    f"Responsable Destino ({nombre_dest_simple}):*",
+                    options=list(opc_dest_cons.keys()) if opc_dest_cons else [None],
+                    index=idx_dest_cons,
+                    format_func=lambda k: opc_dest_cons[k] if k is not None else "Operador Central",
+                    key="sel_usr_dest_cons",
+                )
+
             obs_despacho_consolidado = st.text_area(
                 "Protocolo y Condiciones de Transporte (Inocuidad y Cadena de Frío):*",
                 value="Cadena de frío controlada con termómetro digital en hieleras selladas. Transporte directo sin aperturas intermedias.",
@@ -2960,9 +3061,11 @@ with tab_traslados:
                             partidas=st.session_state["carro_ida_items"],
                             referencia=ref_guia_ida.strip() or "Guía de Ida",
                             observaciones=obs_despacho_consolidado.strip() or None,
+                            id_usuario=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
+                            id_usuario_recepcion=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
                         )
 
-                    # Emitir Retorno si hay ítems
+                    # Emitir Retorno si hay ítems (roles origen/destino invertidos físicamente)
                     if hay_ret:
                         res_ret_dict = db.registrar_traslado_consolidado(
                             id_local_origen=int(local_traslado_destino_id),
@@ -2970,6 +3073,8 @@ with tab_traslados:
                             partidas=st.session_state["carro_retorno_items"],
                             referencia=ref_guia_ret.strip() or "Guía de Retorno",
                             observaciones=obs_despacho_consolidado.strip() or None,
+                            id_usuario=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
+                            id_usuario_recepcion=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
                         )
 
                     # Limpiar carritos
@@ -2981,6 +3086,8 @@ with tab_traslados:
                         "retorno": res_ret_dict,
                         "origen": nombre_orig_simple,
                         "destino": nombre_dest_simple,
+                        "despacha_orig": opc_orig_cons.get(id_usr_orig_cons, "Operador Central") if id_usr_orig_cons else "Operador Central",
+                        "recibe_dest": opc_dest_cons.get(id_usr_dest_cons, "Operador Central") if id_usr_dest_cons else "Operador Central",
                     }
                     st.rerun()
                 except Exception as e:
@@ -3055,6 +3162,26 @@ with tab_traslados:
                         height=55,
                     )
 
+                col_sig_m1, col_sig_m2 = st.columns(2)
+                with col_sig_m1:
+                    opc_orig_man, idx_orig_man = get_opciones_usuarios(int(local_traslado_origen_id), id_usuario_sesion)
+                    id_usr_orig_man = st.selectbox(
+                        f"Despacha en Origen ({nombre_orig_simple}):*",
+                        options=list(opc_orig_man.keys()) if opc_orig_man else [None],
+                        index=idx_orig_man,
+                        format_func=lambda k: opc_orig_man[k] if k is not None else "Operador Central",
+                        key="sel_usr_orig_man",
+                    )
+                with col_sig_m2:
+                    opc_dest_man, idx_dest_man = get_opciones_usuarios(int(local_traslado_destino_id), id_usuario_sesion)
+                    id_usr_dest_man = st.selectbox(
+                        f"Recibe en Destino ({nombre_dest_simple}):*",
+                        options=list(opc_dest_man.keys()) if opc_dest_man else [None],
+                        index=idx_dest_man,
+                        format_func=lambda k: opc_dest_man[k] if k is not None else "Operador Central",
+                        key="sel_usr_dest_man",
+                    )
+
                 btn_traslado_manual = st.form_submit_button("🚚 Ejecutar Traslado Individual", type="primary", use_container_width=True)
 
             if btn_traslado_manual:
@@ -3066,6 +3193,8 @@ with tab_traslados:
                         cantidad=float(cant_traslado),
                         referencia=ref_traslado.strip() or "Traslado interno",
                         observaciones=obs_traslado.strip() or None,
+                        id_usuario=int(id_usr_orig_man) if id_usr_orig_man is not None else None,
+                        id_usuario_recepcion=int(id_usr_dest_man) if id_usr_dest_man is not None else None,
                     )
                     nombre_origen_str = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
                     nombre_destino_str = opciones_destino.get(local_traslado_destino_id, "Destino")
@@ -3079,6 +3208,8 @@ with tab_traslados:
                         "nuevo_destino": res_tr["nuevo_stock_destino"],
                         "producto": fila_traslado_sel["producto"],
                         "lote": fila_traslado_sel["codigo_lote_proveedor"],
+                        "despachado_por": opc_orig_man.get(id_usr_orig_man, "Operador Central") if id_usr_orig_man else "Operador Central",
+                        "recibido_por": opc_dest_man.get(id_usr_dest_man, "Operador Central") if id_usr_dest_man else "Operador Central",
                     }
                     st.rerun()
                 except Exception as e:
@@ -3096,6 +3227,7 @@ with tab_traslados:
         st.dataframe(
             hist_traslados[[
                 "id_movimiento", "fecha_movimiento", "local_origen", "local_destino",
+                "despachado_por", "recibido_por",
                 "producto", "codigo_lote_proveedor", "cantidad", "unidad_medida", "referencia", "observaciones"
             ]],
             use_container_width=True,
@@ -3105,6 +3237,8 @@ with tab_traslados:
                 "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
                 "local_origen": "Local Origen (Desde)",
                 "local_destino": "Local Destino (Hacia)",
+                "despachado_por": "Despachó",
+                "recibido_por": "Recibió",
                 "producto": "Materia Prima",
                 "codigo_lote_proveedor": "Lote Prov.",
                 "cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
@@ -3136,7 +3270,8 @@ with tab_mermas:
                 • <strong>Cantidad descartada:</strong> <code>{v_m['cantidad']:.3f} {v_m['unidad']}</code><br>
                 • <strong>Costo Unitario:</strong> ${v_m['costo_unitario']:,.2f} / {v_m['unidad']}<br>
                 • <strong>Pérdida Financiera Cuantificada:</strong> <strong style="color:#b91c1c;">${v_m['costo_total_perdida']:,.0f} CLP</strong><br>
-                • <strong>Saldo remanente del lote en sucursal:</strong> <code>{v_m['nuevo_stock']:.3f} {v_m['unidad']}</code>
+                • <strong>Saldo remanente del lote en sucursal:</strong> <code>{v_m['nuevo_stock']:.3f} {v_m['unidad']}</code><br>
+                • <strong>Autorizado por:</strong> {v_m.get('responsable', 'Operador Central')}
             </div>
             """,
             unsafe_allow_html=True,
@@ -3242,6 +3377,15 @@ with tab_mermas:
                         help=f"Máximo disponible para dar de baja: {max_merma:.3f} {unidad_merma}",
                     )
 
+                    opc_usr_merma, idx_usr_merma = get_opciones_usuarios(int(local_merma_id), id_usuario_sesion)
+                    id_usr_merma = st.selectbox(
+                        "Autorizado / Declarado por:*",
+                        options=list(opc_usr_merma.keys()) if opc_usr_merma else [None],
+                        index=idx_usr_merma,
+                        format_func=lambda k: opc_usr_merma[k] if k is not None else "Operador Central",
+                        key="sel_usuario_merma",
+                    )
+
                 with col_m_f2:
                     costo_perdida_estimada = cant_merma * costo_unid_merma
                     st.markdown(
@@ -3277,6 +3421,7 @@ with tab_mermas:
                             cantidad=float(cant_merma),
                             motivo=motivo_sel,
                             observaciones=obs_merma.strip(),
+                            id_usuario=int(id_usr_merma) if id_usr_merma is not None else None,
                         )
                         st.session_state["voucher_merma"] = {
                             "id_movimiento": res_m["id_movimiento"],
@@ -3288,6 +3433,7 @@ with tab_mermas:
                             "costo_unitario": res_m["costo_unitario"],
                             "costo_total_perdida": res_m["costo_total_perdida"],
                             "nuevo_stock": res_m["nuevo_stock"],
+                            "responsable": opc_usr_merma.get(id_usr_merma, "Operador Central") if id_usr_merma else "Operador Central",
                         }
                         st.rerun()
                     except Exception as e:
@@ -3520,6 +3666,7 @@ with tab_trazabilidad:
                                 <div class="timeline-header">2. 📥 Recepción Física</div>
                                 <div class="timeline-body">
                                     • <strong>Local Ingreso:</strong> {info['local_receptor_original']}<br>
+                                    • <strong>Recibido por:</strong> {info.get('recibido_por', 'Operador Central')}<br>
                                     • <strong>Fecha Recepción:</strong> {info['fecha_recepcion']}<br>
                                     • <strong>Volumen Inicial:</strong> {info['cantidad_inicial']:.3f} {info['unidad_medida']}<br>
                                     • <strong>Costo Unitario:</strong> {costo_label}<br>
@@ -3582,6 +3729,8 @@ with tab_trazabilidad:
                                         "destino": "Destino",
                                         "cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
                                         "referencia": "Ref.",
+                                        "despachado_por": "Despachó / Operó",
+                                        "recibido_por": "Recibió",
                                     },
                                 )
 
@@ -3610,6 +3759,8 @@ with tab_trazabilidad:
                     "cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
                     "unidad_medida": "Unidad",
                     "referencia": "Referencia / Guía",
+                    "despachado_por": "Despachó / Operó",
+                    "recibido_por": "Recibió",
                     "observaciones": "Observaciones",
                     "estado": "Estado",
                 },
