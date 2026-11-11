@@ -46,6 +46,104 @@ def load_locales() -> pd.DataFrame:
         return pd.read_sql(query, connection)
 
 
+def load_usuarios(id_local: Optional[int] = None, solo_activos: bool = True) -> pd.DataFrame:
+    """Carga los usuarios y personal operativo con filtro opcional por local y estado."""
+    condiciones = []
+    if solo_activos:
+        condiciones.append("activo = TRUE")
+    if id_local is not None:
+        condiciones.append("(id_local = :id_local OR id_local IS NULL)")
+
+    where_clause = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+    query = text(
+        f"""
+        SELECT id_usuario, nombre, nombre_usuario, rol, id_local, pin, activo, creado_en
+        FROM usuarios
+        {where_clause}
+        ORDER BY id_usuario
+        """
+    )
+    with engine.connect() as connection:
+        return pd.read_sql(query, connection, params={"id_local": id_local} if id_local else {})
+
+
+def crear_usuario(
+    nombre: str,
+    nombre_usuario: str,
+    rol: str = "cocinero",
+    id_local: Optional[int] = None,
+    pin: str = "1234",
+    activo: bool = True,
+) -> int:
+    """Crea un nuevo usuario / operador con PIN táctil para trazabilidad."""
+    if not nombre.strip() or not nombre_usuario.strip():
+        raise ValueError("El nombre completo y el nombre de usuario son obligatorios.")
+    roles_validos = ('administrador', 'operador', 'jefe_cocina', 'cocinero', 'bodeguero', 'cajero_garzon')
+    if rol not in roles_validos:
+        raise ValueError(f"Rol no permitido. Debe ser uno de: {', '.join(roles_validos)}")
+    if not pin or len(pin.strip()) != 4 or not pin.strip().isdigit():
+        raise ValueError("El PIN táctil debe ser exactamente de 4 dígitos numéricos.")
+
+    query = text(
+        """
+        INSERT INTO usuarios (nombre, nombre_usuario, rol, id_local, pin, activo)
+        VALUES (:nombre, :nombre_usuario, :rol, :id_local, :pin, :activo)
+        RETURNING id_usuario;
+        """
+    )
+    with engine.begin() as conn:
+        return conn.execute(
+            query,
+            {
+                "nombre": nombre.strip(),
+                "nombre_usuario": nombre_usuario.strip().lower(),
+                "rol": rol,
+                "id_local": id_local,
+                "pin": pin.strip(),
+                "activo": activo,
+            },
+        ).scalar_one()
+
+
+def actualizar_usuario(
+    id_usuario: int,
+    nombre: str,
+    rol: str,
+    id_local: Optional[int] = None,
+    pin: str = "1234",
+    activo: bool = True,
+) -> bool:
+    """Actualiza los datos, rol, local o PIN táctil de un usuario existente."""
+    if not nombre.strip():
+        raise ValueError("El nombre completo es obligatorio.")
+    if not pin or len(pin.strip()) != 4 or not pin.strip().isdigit():
+        raise ValueError("El PIN táctil debe ser exactamente de 4 dígitos numéricos.")
+    query = text(
+        """
+        UPDATE usuarios
+        SET nombre = :nombre,
+            rol = :rol,
+            id_local = :id_local,
+            pin = :pin,
+            activo = :activo
+        WHERE id_usuario = :id_usuario;
+        """
+    )
+    with engine.begin() as conn:
+        result = conn.execute(
+            query,
+            {
+                "id_usuario": id_usuario,
+                "nombre": nombre.strip(),
+                "rol": rol,
+                "id_local": id_local,
+                "pin": pin.strip(),
+                "activo": activo,
+            },
+        )
+        return result.rowcount > 0
+
+
 def load_proveedores(solo_activos: bool = False) -> pd.DataFrame:
     """Carga los proveedores registrados con opción de filtrar solo activos."""
     filtro = "WHERE activo = TRUE" if solo_activos else ""
@@ -451,10 +549,11 @@ def registrar_recepcion_compra(
     temperatura_recepcion: float = 2.0,
     costo_unitario: Optional[float] = None,
     observaciones: Optional[str] = None,
+    id_usuario_receptor: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Registra de manera atómica una compra, detalle, lote y actualiza el stock
-    en el local receptor dentro de una única transacción.
+    en el local receptor dentro de una única transacción, asociando el usuario receptor.
     """
     if fecha_recepcion < fecha_compra:
         raise ValueError("La fecha de recepción no puede ser anterior a la fecha de compra.")
@@ -483,16 +582,21 @@ def registrar_recepcion_compra(
 
         if res_compra:
             id_compra = res_compra[0]
+            if id_usuario_receptor is not None:
+                conn.execute(
+                    text("UPDATE compras SET id_usuario_receptor = COALESCE(id_usuario_receptor, :u) WHERE id_compra = :c"),
+                    {"u": id_usuario_receptor, "c": id_compra}
+                )
         else:
             q_insert_compra = text(
                 """
                 INSERT INTO compras (
                     id_proveedor, id_local_receptor, tipo_documento,
-                    numero_documento, fecha_compra, fecha_recepcion, observaciones
+                    numero_documento, fecha_compra, fecha_recepcion, observaciones, id_usuario_receptor
                 )
                 VALUES (
                     :id_proveedor, :id_local_receptor, :tipo_documento,
-                    :numero_documento, :fecha_compra, :fecha_recepcion, :observaciones
+                    :numero_documento, :fecha_compra, :fecha_recepcion, :observaciones, :id_usuario_receptor
                 )
                 RETURNING id_compra;
                 """
@@ -507,6 +611,7 @@ def registrar_recepcion_compra(
                     "fecha_compra": fecha_compra,
                     "fecha_recepcion": fecha_recepcion,
                     "observaciones": observaciones,
+                    "id_usuario_receptor": id_usuario_receptor,
                 },
             ).scalar_one()
 
@@ -1053,9 +1158,10 @@ def registrar_traslado_local(
     referencia: Optional[str] = None,
     observaciones: Optional[str] = None,
     id_usuario: Optional[int] = None,
+    id_usuario_recepcion: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Registra un traslado de mercadería entre dos sucursales.
+    Registra un traslado de mercadería entre dos sucursales con trazabilidad dual (despachador y receptor).
     El lote original mantiene su ID, descontándose del origen y sumándose al destino.
     """
     if id_local_origen == id_local_destino:
@@ -1090,11 +1196,11 @@ def registrar_traslado_local(
             """
             INSERT INTO movimientos (
                 tipo_movimiento, id_local_origen, id_local_destino,
-                id_usuario, referencia, observaciones, estado
+                id_usuario, id_usuario_recepcion, referencia, observaciones, estado
             )
             VALUES (
                 'traslado', :id_local_origen, :id_local_destino,
-                :id_usuario, :referencia, :observaciones, 'confirmado'
+                :id_usuario, :id_usuario_recepcion, :referencia, :observaciones, 'confirmado'
             )
             RETURNING id_movimiento;
             """
@@ -1105,6 +1211,7 @@ def registrar_traslado_local(
                 "id_local_origen": id_local_origen,
                 "id_local_destino": id_local_destino,
                 "id_usuario": id_usuario,
+                "id_usuario_recepcion": id_usuario_recepcion,
                 "referencia": referencia or "Guía de traslado interno",
                 "observaciones": observaciones,
             },
@@ -1190,9 +1297,11 @@ def registrar_traslado_consolidado(
     referencia: Optional[str] = None,
     observaciones: Optional[str] = None,
     id_usuario: Optional[int] = None,
+    id_usuario_recepcion: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Registra un traslado consolidado multi-lote entre dos sucursales en una sola transacción atómica.
+    Registra un traslado consolidado multi-lote entre dos sucursales en una sola transacción atómica,
+    con trazabilidad dual de usuario despachador y usuario receptor.
     Crea 1 registro cabecera en movimientos y N detalles en detalle_movimiento.
     Actualiza atómicamente el stock de origen y destino para cada lote garantizando integridad referencial.
     """
@@ -1207,11 +1316,11 @@ def registrar_traslado_consolidado(
             """
             INSERT INTO movimientos (
                 tipo_movimiento, id_local_origen, id_local_destino,
-                id_usuario, referencia, observaciones, estado
+                id_usuario, id_usuario_recepcion, referencia, observaciones, estado
             )
             VALUES (
                 'traslado', :id_local_origen, :id_local_destino,
-                :id_usuario, :referencia, :observaciones, 'confirmado'
+                :id_usuario, :id_usuario_recepcion, :referencia, :observaciones, 'confirmado'
             )
             RETURNING id_movimiento;
             """
@@ -1222,6 +1331,7 @@ def registrar_traslado_consolidado(
                 "id_local_origen": id_local_origen,
                 "id_local_destino": id_local_destino,
                 "id_usuario": id_usuario,
+                "id_usuario_recepcion": id_usuario_recepcion,
                 "referencia": referencia or "Guía de traslado consolidada",
                 "observaciones": observaciones,
             },
@@ -1346,7 +1456,9 @@ def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) 
             p.unidad_medida,
             m.referencia,
             m.observaciones,
-            m.estado
+            m.estado,
+            COALESCE(u_o.nombre, 'Operador Sistema') AS despachado_por,
+            COALESCE(u_d.nombre, '-') AS recibido_por
         FROM detalle_movimiento AS dm
         JOIN movimientos AS m ON m.id_movimiento = dm.id_movimiento
         JOIN lotes AS l ON l.id_lote = dm.id_lote
@@ -1354,6 +1466,8 @@ def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) 
         JOIN productos AS p ON p.id_producto = dc.id_producto
         JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
         LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
+        LEFT JOIN usuarios AS u_o ON u_o.id_usuario = m.id_usuario
+        LEFT JOIN usuarios AS u_d ON u_d.id_usuario = m.id_usuario_recepcion
         {where_clause}
         ORDER BY m.fecha_movimiento DESC, m.id_movimiento DESC
         LIMIT :limit

@@ -31,6 +31,17 @@ dbLocal.version(2).stores({
   productos: 'id_producto, nombre'
 });
 
+dbLocal.version(3).stores({
+  config: 'clave',
+  recetas: 'id_receta, categoria, nombre',
+  stock_lotes: 'id_lote, id_producto, fecha_vencimiento',
+  outbox_pendientes: 'id_evento, tipo_evento, fecha_local, estado',
+  historial_sync: 'id_evento, fecha_local, fecha_sync',
+  proveedores: 'id_proveedor, nombre',
+  productos: 'id_producto, nombre',
+  usuarios: 'id_usuario, nombre, rol'
+});
+
 // 2. ESTADO GLOBAL DE LA APLICACIÓN
 const state = {
   idLocal: 1,
@@ -43,6 +54,8 @@ const state = {
   isSyncing: false,
   proveedoresList: [],
   productosList: [],
+  usuariosList: [],
+  idChefActivo: null,
   stockDisponiblePorProducto: {}
 };
 
@@ -132,7 +145,15 @@ const app = {
           state.productosList = data.productos;
         }
 
+        // Guardar usuarios y personal para firma de movimientos
+        if (data.usuarios && data.usuarios.length > 0) {
+          await dbLocal.usuarios.clear();
+          await dbLocal.usuarios.bulkPut(data.usuarios);
+          state.usuariosList = data.usuarios;
+        }
+
         state.recetasList = data.recetas;
+        this.renderSelectoresUsuarios();
         await this.actualizarStockLocal();
         this.mostrarToast('✅ Datos Sincronizados', `Recetas: ${data.total_recetas} • Lotes: ${data.total_lotes_disponibles}`, 'success');
         return;
@@ -146,6 +167,7 @@ const app = {
     const stockLocal = await dbLocal.stock_lotes.toArray();
     state.proveedoresList = await dbLocal.proveedores.toArray();
     state.productosList = await dbLocal.productos.toArray();
+    state.usuariosList = await dbLocal.usuarios.toArray();
     const cfgNombre = await dbLocal.config.get('nombre_local');
     const cfgSnap = await dbLocal.config.get('timestamp_snapshot');
 
@@ -155,6 +177,7 @@ const app = {
 
     if (recetasLocales.length > 0) {
       state.recetasList = recetasLocales;
+      this.renderSelectoresUsuarios();
       await this.actualizarStockLocal();
       this.mostrarToast('📦 Modo Autónomo', 'Cargado desde caché local (IndexedDB)', 'warning');
     } else {
@@ -233,6 +256,9 @@ const app = {
 
     // 3. Generar Evento Inmutable para el Outbox con UUID v4
     const idEvento = crypto.randomUUID();
+    const chefObj = state.usuariosList.find(u => u.id_usuario === state.idChefActivo);
+    const nombreChef = chefObj ? chefObj.nombre : 'Jefe de Cocina';
+
     const evento = {
       id_evento: idEvento,
       tipo_evento: 'PRODUCCION_RECETAS',
@@ -241,7 +267,9 @@ const app = {
       payload: {
         orden_platos: platosResumen,
         turno: state.turno,
-        observaciones: `Despacho táctil KDS • Local ${state.idLocal}`,
+        id_usuario: state.idChefActivo,
+        nombre_usuario: nombreChef,
+        observaciones: `Despacho táctil KDS • Local ${state.idLocal} • Resp: ${nombreChef}`,
         lotes_afectados_estimados: lotesAfectados
       }
     };
@@ -617,7 +645,51 @@ const app = {
     `).join('');
   },
 
+  renderSelectoresUsuarios() {
+    const selChef = document.getElementById('sel-chef-turno');
+    const selRec = document.getElementById('sel-recepcion-usuario');
+    const selMerma = document.getElementById('sel-merma-usuario');
+
+    if (!state.usuariosList || state.usuariosList.length === 0) {
+      if (selChef) selChef.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
+      if (selRec) selRec.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
+      if (selMerma) selMerma.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
+      state.idChefActivo = 1;
+      return;
+    }
+
+    const opcionesHtml = state.usuariosList.map(u => `
+      <option value="${u.id_usuario}">
+        ${u.nombre} (${u.rol.replace('_', ' ')})
+      </option>
+    `).join('');
+
+    if (selChef) {
+      selChef.innerHTML = opcionesHtml;
+      if (!state.idChefActivo) {
+        const jefe = state.usuariosList.find(u => u.rol === 'jefe_cocina') || state.usuariosList[0];
+        state.idChefActivo = jefe.id_usuario;
+        selChef.value = state.idChefActivo;
+      } else {
+        selChef.value = state.idChefActivo;
+      }
+    }
+
+    if (selRec) selRec.innerHTML = opcionesHtml;
+    if (selMerma) selMerma.innerHTML = opcionesHtml;
+  },
+
+  cambiarChefTurno(idUserStr) {
+    state.idChefActivo = parseInt(idUserStr, 10);
+    const chefObj = state.usuariosList.find(u => u.id_usuario === state.idChefActivo);
+    const nombre = chefObj ? chefObj.nombre : 'Responsable';
+    this.mostrarToast('👨‍🍳 Chef Asignado', `${nombre} a cargo del turno`, 'info');
+  },
+
   abrirModalMerma() {
+    this.renderSelectoresUsuarios();
+    const pinInp = document.getElementById('inp-merma-pin');
+    if (pinInp) pinInp.value = '';
     document.getElementById('modal-merma').classList.remove('hidden');
   },
 
@@ -630,10 +702,22 @@ const app = {
     const cant = parseFloat(document.getElementById('inp-merma-cant').value);
     const motivo = document.getElementById('sel-merma-motivo').value;
 
+    const selUser = document.getElementById('sel-merma-usuario');
+    const idUsuario = selUser ? parseInt(selUser.value, 10) : state.idChefActivo;
+    const pin = (document.getElementById('inp-merma-pin')?.value || '').trim();
+    const userObj = state.usuariosList.find(u => u.id_usuario === idUsuario);
+
+    if (userObj && userObj.pin && pin !== userObj.pin) {
+      alert(`❌ PIN de seguridad incorrecto.\n\nLa merma debe ser autorizada con el PIN del responsable (PIN demo: ${userObj.pin}).`);
+      return;
+    }
+
     if (!idLote || isNaN(cant) || cant <= 0) {
       alert('Por favor especifica una cantidad válida.');
       return;
     }
+
+    const nombreUsuario = userObj ? userObj.nombre : 'Responsable Merma';
 
     // Descontar en stock local
     const lote = await dbLocal.stock_lotes.get(idLote);
@@ -652,14 +736,16 @@ const app = {
       payload: {
         id_lote: idLote,
         cantidad: cant,
-        observaciones: `Merma Operativa: ${motivo}`
+        id_usuario: idUsuario,
+        nombre_usuario: nombreUsuario,
+        observaciones: `Merma Operativa: ${motivo} • Firma: ${nombreUsuario}`
       }
     });
 
     this.cerrarModalMerma();
     await this.actualizarStockLocal();
     await this.actualizarContadorOutbox();
-    this.mostrarToast('⚠️ Merma Registrada', `${cant} descontados localmente (UUID: ${idEvento.substring(0, 8)})`, 'warning');
+    this.mostrarToast('⚠️ Merma Registrada', `${cant} descontados localmente por ${nombreUsuario}`, 'warning');
 
     if (navigator.onLine && !state.simulacionOfflineForzada) {
       this.sincronizarColaBackground();
@@ -670,6 +756,10 @@ const app = {
   // RECEPCIÓN DE MERCADERÍAS (RESOLUCIÓN DE QUIEBRE DE STOCK OFFLINE)
   // ----------------------------------------------------------------------------
   abrirModalRecepcion(idProductoPreseleccionado = null) {
+    this.renderSelectoresUsuarios();
+    const pinInp = document.getElementById('inp-recepcion-pin');
+    if (pinInp) pinInp.value = '';
+
     const selProd = document.getElementById('sel-recepcion-producto');
     const selProv = document.getElementById('sel-recepcion-proveedor');
 
@@ -770,6 +860,18 @@ const app = {
     const tempRecepcion = parseFloat(document.getElementById('inp-recepcion-temp').value) || 2.0;
     const obs = document.getElementById('inp-recepcion-obs').value.trim();
 
+    const selUser = document.getElementById('sel-recepcion-usuario');
+    const idUsuario = selUser ? parseInt(selUser.value, 10) : state.idChefActivo;
+    const pin = (document.getElementById('inp-recepcion-pin')?.value || '').trim();
+    const userObj = state.usuariosList.find(u => u.id_usuario === idUsuario);
+
+    if (userObj && userObj.pin && pin !== userObj.pin) {
+      alert(`❌ PIN de seguridad incorrecto.\n\nLa recepción de mercadería debe ser validada con el PIN del responsable (PIN demo: ${userObj.pin}).`);
+      return;
+    }
+
+    const nombreUsuario = userObj ? userObj.nombre : 'Responsable Receptor';
+
     if (!idProd || isNaN(cant) || cant <= 0) {
       alert('Por favor especifica un producto y una cantidad mayor a 0.');
       return;
@@ -828,7 +930,9 @@ const app = {
         tipo_documento: 'GUIA_DESPACHO',
         numero_documento: numDoc || `GD-OFF-${idEvento.substring(0, 6)}`,
         id_lote_provisorio: idLoteProvisorio,
-        observaciones: obs
+        id_usuario_receptor: idUsuario,
+        nombre_usuario_receptor: nombreUsuario,
+        observaciones: `${obs} • Receptor: ${nombreUsuario}`
       }
     };
 
@@ -879,6 +983,7 @@ const app = {
           html += `<h4 class="text-xs font-bold uppercase text-yellow-400 mb-2">Pendientes de Envío (${items.length}):</h4>`;
           html += items.map(it => {
             const esRecepcion = it.tipo_evento === 'RECEPCION_MERCADERIA_OFFLINE';
+            const firmante = it.payload.nombre_usuario || it.payload.nombre_usuario_receptor || 'Chef de Turno';
             return `
               <div class="bg-gray-800 border ${esRecepcion ? 'border-emerald-600/70 bg-emerald-950/20' : 'border-yellow-700/50'} p-2.5 rounded-lg text-xs space-y-1">
                 <div class="flex justify-between items-center">
@@ -886,6 +991,7 @@ const app = {
                   <span class="${esRecepcion ? 'text-emerald-300' : 'text-yellow-400'} font-mono text-[10px]">UUID: ${it.id_evento.substring(0, 8)}...</span>
                 </div>
                 ${esRecepcion ? `<p class="text-emerald-300 font-semibold text-[11px]">📦 +${it.payload.cantidad} ${it.payload.unidad_medida || 'kg'} de ${it.payload.nombre_producto} (${it.payload.nombre_proveedor || 'Proveedor'}) • Doc: ${it.payload.numero_documento}</p>` : ''}
+                <p class="text-indigo-300 text-[10px] font-medium">✍️ Firmado por: <strong>${firmante}</strong></p>
                 <p class="text-gray-300 text-[11px]">${it.payload.observaciones || 'Sin observaciones'}</p>
                 <p class="text-gray-500 text-[10px]">Generado local: ${new Date(it.fecha_local).toLocaleTimeString()}</p>
               </div>

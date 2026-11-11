@@ -175,6 +175,18 @@ def get_bootstrap_local(id_local: int):
         for _, row in df_prod.iterrows()
     ]
 
+    # 6. Cargar usuarios y personal operativo asignado al local para firma y trazabilidad
+    df_usuarios = db.load_usuarios(id_local=id_local, solo_activos=True)
+    usuarios = [
+        {
+            "id_usuario": int(row["id_usuario"]),
+            "nombre": str(row["nombre"]),
+            "rol": str(row["rol"]),
+            "pin": str(row["pin"] or "1234"),
+        }
+        for _, row in df_usuarios.iterrows()
+    ]
+
     return {
         "id_local": id_local,
         "nombre_local": nombre_local,
@@ -185,6 +197,7 @@ def get_bootstrap_local(id_local: int):
         "stock_fefo": stock_lotes,
         "proveedores": proveedores,
         "productos": productos,
+        "usuarios": usuarios,
     }
 
 
@@ -267,12 +280,14 @@ def sync_batch(lote: LoteSyncRequest):
                 orden_platos = {int(k): int(v) for k, v in ev.payload.get("orden_platos", {}).items()}
                 turno = str(ev.payload.get("turno", "General"))
                 obs = f"Sync Offline [{ev_uuid[:8]}]: {ev.payload.get('observaciones', '')}".strip()
+                id_usuario_prod = ev.payload.get("id_usuario")
 
                 resultado = db.consumir_produccion_recetas(
                     id_local=lote.id_local,
                     orden_platos=orden_platos,
                     turno=turno,
                     observaciones=obs,
+                    id_usuario=id_usuario_prod,
                 )
 
                 # Marcar evento como procesado
@@ -294,6 +309,7 @@ def sync_batch(lote: LoteSyncRequest):
                 id_lote = int(ev.payload["id_lote"])
                 cantidad = float(ev.payload["cantidad"])
                 obs = f"Sync Offline [{ev_uuid[:8]}]: {ev.payload.get('observaciones', '')}".strip()
+                id_usuario_salida = ev.payload.get("id_usuario")
 
                 db.registrar_salida_cocina(
                     id_local=lote.id_local,
@@ -301,6 +317,7 @@ def sync_batch(lote: LoteSyncRequest):
                     cantidad=cantidad,
                     referencia="SALIDA_OFFLINE",
                     observaciones=obs,
+                    id_usuario=id_usuario_salida,
                 )
 
                 with db.engine.begin() as conn:
@@ -322,6 +339,7 @@ def sync_batch(lote: LoteSyncRequest):
                 id_producto = int(ev.payload["id_producto"])
                 cantidad = float(ev.payload["cantidad"])
                 codigo_lote = str(ev.payload.get("codigo_lote_proveedor", f"LOTE-OFFLINE-{ev_uuid[:6]}"))
+                id_usuario_rec = ev.payload.get("id_usuario_receptor") or ev.payload.get("id_usuario")
                 
                 fecha_venc_raw = ev.payload.get("fecha_vencimiento")
                 if fecha_venc_raw:
@@ -359,6 +377,7 @@ def sync_batch(lote: LoteSyncRequest):
                     fecha_vencimiento=fecha_venc,
                     temperatura_recepcion=temperatura,
                     observaciones=obs,
+                    id_usuario_receptor=id_usuario_rec,
                 )
 
                 with db.engine.begin() as conn:

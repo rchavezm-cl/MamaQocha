@@ -3625,8 +3625,13 @@ with tab_maestros:
         "Las altas y modificaciones se sincronizan de inmediato con los formularios de recepción e inventario."
     )
 
-    subtab_m_prov, subtab_m_prod, subtab_m_recetas = st.tabs(
-        ["🏢 Catálogo de Proveedores", "🥩 Catálogo de Materias Primas", "🍽️ Fichas Técnicas de Recetas"]
+    subtab_m_prov, subtab_m_prod, subtab_m_recetas, subtab_m_usuarios = st.tabs(
+        [
+            "🏢 Catálogo de Proveedores",
+            "🥩 Catálogo de Materias Primas",
+            "🍽️ Fichas Técnicas de Recetas",
+            "👥 Personal y Usuarios (Trazabilidad)",
+        ]
     )
 
     # --------------------------------------------------------------------------
@@ -3911,4 +3916,164 @@ with tab_maestros:
                         "precio_venta": st.column_config.NumberColumn("Precio Venta", format="$%d CLP"),
                     },
                 )
+
+    # --------------------------------------------------------------------------
+    # SUBTAB: USUARIOS Y PERSONAL OPERATIVO (TRAZABILIDAD Y FIRMA PIN)
+    # --------------------------------------------------------------------------
+    with subtab_m_usuarios:
+        todos_usr_df = db.load_usuarios(solo_activos=False)
+
+        col_u_tbl, col_u_act = st.columns([1.5, 1])
+
+        with col_u_tbl:
+            st.markdown("##### 👥 Personal Operativo y Usuarios del Sistema")
+            st.caption("Personal habilitado para firmar recepciones, despachos de cocina, mermas y traslados con PIN táctil.")
+            if todos_usr_df.empty:
+                st.info("No hay usuarios registrados en el sistema.")
+            else:
+                dict_loc_nomb = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
+                df_u_show = todos_usr_df.copy()
+                df_u_show["local_nombre"] = df_u_show["id_local"].map(dict_loc_nomb).fillna("🌐 Todos los Locales (Admin)")
+
+                st.dataframe(
+                    df_u_show[[
+                        "id_usuario", "nombre", "nombre_usuario", "rol", "local_nombre", "pin", "activo"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "id_usuario": st.column_config.NumberColumn("ID", width="small"),
+                        "nombre": "Nombre y Apellido",
+                        "nombre_usuario": "Username",
+                        "rol": "Rol Operativo",
+                        "local_nombre": "Sucursal Asignada",
+                        "pin": st.column_config.TextColumn("PIN Táctil", width="small"),
+                        "activo": st.column_config.CheckboxColumn("Activo", width="small"),
+                    },
+                )
+
+        with col_u_act:
+            st.markdown("##### 🛠️ Acciones de Personal")
+            accion_usr = st.radio(
+                "Operación de usuario:",
+                ["➕ Registrar Nuevo Personal", "✏️ Modificar Personal / PIN"],
+                horizontal=True,
+                key="radio_accion_usr",
+            )
+
+            roles_disponibles = {
+                "jefe_cocina": "Chef / Jefe de Cocina (Firma comandas y recepciones)",
+                "cocinero": "Cocinero / Partida fría o caliente",
+                "bodeguero": "Bodeguero / Encargado de recepción y frío",
+                "administrador": "Administrador General",
+                "cajero_garzon": "Cajero / Garzón / Pase de mesa",
+                "operador": "Operador General",
+            }
+
+            opciones_locales_usr = {None: "🌐 Todos los Locales (Corporativo)"}
+            for _, r_loc in locales_df.iterrows():
+                opciones_locales_usr[int(r_loc["id_local"])] = f"📍 {r_loc['nombre']}"
+
+            if accion_usr == "➕ Registrar Nuevo Personal":
+                with st.container(border=True):
+                    st.markdown("###### Alta de Personal / Usuario")
+                    with st.form("form_alta_usuario", clear_on_submit=True):
+                        u_nom = st.text_input("Nombre y Apellido:*", placeholder="Ej. Carlos Mendoza")
+                        u_uname = st.text_input("Nombre de usuario (Login):*", placeholder="Ej. cmendoza").strip().lower()
+                        u_rol = st.selectbox(
+                            "Rol operativo:*",
+                            options=list(roles_disponibles.keys()),
+                            format_func=lambda k: roles_disponibles[k],
+                        )
+                        u_local = st.selectbox(
+                            "Local asignado:*",
+                            options=list(opciones_locales_usr.keys()),
+                            format_func=lambda k: opciones_locales_usr[k],
+                        )
+                        u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value="1234", max_chars=4, help="PIN numérico para pantalla táctil en cocina").strip()
+                        u_act = st.checkbox("Usuario Activo", value=True)
+
+                        btn_crear_usr = st.form_submit_button("💾 Guardar Personal", type="primary", use_container_width=True)
+
+                    if btn_crear_usr:
+                        if not u_nom.strip() or not u_uname.strip():
+                            st.error("Nombre y username son obligatorios.")
+                        elif len(u_pin) != 4 or not u_pin.isdigit():
+                            st.error("El PIN táctil debe ser exactamente de 4 dígitos numéricos.")
+                        else:
+                            try:
+                                nuevo_id_usr = db.crear_usuario(
+                                    nombre=u_nom,
+                                    nombre_usuario=u_uname,
+                                    rol=u_rol,
+                                    id_local=u_local,
+                                    pin=u_pin,
+                                    activo=u_act,
+                                )
+                                st.success(f"Personal registrado exitosamente con ID {nuevo_id_usr} (PIN: {u_pin}).")
+                                st.rerun()
+                            except Exception as ex_u:
+                                st.error(f"Error al registrar usuario: {str(ex_u)}")
+
+            elif accion_usr == "✏️ Modificar Personal / PIN":
+                with st.container(border=True):
+                    st.markdown("###### Edición de Personal y Reseteo de PIN")
+                    if todos_usr_df.empty:
+                        st.info("No hay usuarios para editar.")
+                    else:
+                        dict_usr_sel = {
+                            row["id_usuario"]: f"#{row['id_usuario']} - {row['nombre']} ({row['rol']})"
+                            for _, row in todos_usr_df.iterrows()
+                        }
+                        usr_sel_id = st.selectbox(
+                            "Seleccionar usuario:",
+                            options=list(dict_usr_sel.keys()),
+                            format_func=lambda k: dict_usr_sel[k],
+                            key="sel_mod_usr",
+                        )
+
+                        fila_u = todos_usr_df[todos_usr_df["id_usuario"] == usr_sel_id].iloc[0]
+
+                        with st.form("form_edit_usuario"):
+                            e_u_nom = st.text_input("Nombre y Apellido:*", value=str(fila_u["nombre"]))
+                            rol_idx = list(roles_disponibles.keys()).index(fila_u["rol"]) if fila_u["rol"] in roles_disponibles else 0
+                            e_u_rol = st.selectbox(
+                                "Rol operativo:*",
+                                options=list(roles_disponibles.keys()),
+                                index=rol_idx,
+                                format_func=lambda k: roles_disponibles[k],
+                            )
+                            loc_actual = int(fila_u["id_local"]) if pd.notna(fila_u["id_local"]) else None
+                            loc_keys = list(opciones_locales_usr.keys())
+                            loc_idx = loc_keys.index(loc_actual) if loc_actual in loc_keys else 0
+                            e_u_loc = st.selectbox(
+                                "Local asignado:*",
+                                options=loc_keys,
+                                index=loc_idx,
+                                format_func=lambda k: opciones_locales_usr[k],
+                            )
+                            e_u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value=str(fila_u["pin"] or "1234"), max_chars=4).strip()
+                            e_u_act = st.checkbox("Usuario Activo", value=bool(fila_u["activo"]))
+
+                            btn_mod_usr = st.form_submit_button("🔄 Actualizar Datos", type="primary", use_container_width=True)
+
+                        if btn_mod_usr:
+                            if not e_u_nom.strip():
+                                st.error("El nombre es obligatorio.")
+                            elif len(e_u_pin) != 4 or not e_u_pin.isdigit():
+                                st.error("El PIN táctil debe ser de 4 dígitos numéricos.")
+                            else:
+                                try:
+                                    db.actualizar_usuario(
+                                        id_usuario=int(usr_sel_id),
+                                        nombre=e_u_nom,
+                                        rol=e_u_rol,
+                                        id_local=e_u_loc,
+                                        pin=e_u_pin,
+                                        activo=e_u_act,
+                                    )
+                                    st.success(f"Usuario {e_u_nom} actualizado correctamente.")
+                                    st.rerun()
+                                except Exception as ex_mod_u:
+                                    st.error(f"Error al actualizar usuario: {str(ex_mod_u)}")
 
