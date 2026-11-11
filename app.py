@@ -1,5 +1,6 @@
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from typing import Optional
 
@@ -13,12 +14,766 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-import importlib
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 import db
-importlib.reload(db)
+import reportes_pdf
+
+
+# ==============================================================================
+# CACHÉ EN MEMORIA DE CONSULTAS A NEON POSTGRESQL Y SELECTOR EN PASTILLAS
+# ==============================================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_locales() -> pd.DataFrame:
+    return db.load_locales()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_proveedores(solo_activos: bool = True) -> pd.DataFrame:
+    return db.load_proveedores(solo_activos=solo_activos)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_productos(solo_activos: bool = True) -> pd.DataFrame:
+    return db.load_productos(solo_activos=solo_activos)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_usuarios(solo_activos: bool = True) -> pd.DataFrame:
+    return db.load_usuarios(solo_activos=solo_activos)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_recetas(solo_activas: bool = True) -> pd.DataFrame:
+    return db.load_recetas(solo_activas=solo_activas)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _c_recetas_catalogo(solo_activas: bool = True) -> pd.DataFrame:
+    return db.load_recetas_catalogo(solo_activas=solo_activas)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_resumen_metricas(id_local: Optional[int] = None) -> dict:
+    return db.load_resumen_metricas(id_local=id_local)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_inventario_alertas(id_local: Optional[int] = None) -> pd.DataFrame:
+    return db.load_inventario_alertas(id_local=id_local)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_stock_disponible_local(id_local: int) -> pd.DataFrame:
+    return db.load_stock_disponible_local(id_local)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_top_riesgo_traslado(id_local: int, limit: int = 7) -> pd.DataFrame:
+    return db.load_top_riesgo_traslado(id_local, limit=limit)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_historial_movimientos(
+    id_local: Optional[int] = None,
+    limit: int = 50,
+    tipo_movimiento: Optional[str] = None,
+) -> pd.DataFrame:
+    return db.load_historial_movimientos(
+        id_local=id_local,
+        limit=limit,
+        tipo_movimiento=tipo_movimiento,
+    )
+
+
+def _derivar_top_riesgo_desde_stock(df_stock: pd.DataFrame, limit: int = 7) -> pd.DataFrame:
+    """Deriva el Top N en riesgo FEFO en memoria a partir del stock completo del local."""
+    if df_stock.empty:
+        return pd.DataFrame()
+    df_top = df_stock.copy()
+    df_top["valor_en_riesgo"] = (
+        df_top["stock_disponible"].astype(float) * df_top["costo_unitario"].astype(float)
+    ).round(0)
+
+    def _alerta(dias: int) -> str:
+        if dias < 0:
+            return "🔴 Vencido"
+        if dias <= 2:
+            return "🔴 Crítico (≤2d)"
+        if dias <= 5:
+            return "🟠 Urgente (3-5d)"
+        if dias <= 10:
+            return "🟡 Preventivo (6-10d)"
+        return "🟢 Normal (>10d)"
+
+    df_top["estado_alerta"] = df_top["dias_para_vencer"].astype(int).apply(_alerta)
+    return (
+        df_top.sort_values(
+            by=["fecha_vencimiento", "valor_en_riesgo", "id_lote"],
+            ascending=[True, False, True],
+        )
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_datos_traslado_bilateral(
+    id_origen: int,
+    id_destino: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Carga en paralelo el stock disponible del local origen y el Top 7 crítico del destino,
+    derivando el Top 7 del origen en memoria para evitar una consulta SQL redundante.
+    """
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_origen = pool.submit(db.load_stock_disponible_local, int(id_origen))
+        fut_destino = pool.submit(db.load_top_riesgo_traslado, int(id_destino), 7)
+        df_stock_orig = fut_origen.result()
+        df_top_dest = fut_destino.result()
+    df_top_orig = _derivar_top_riesgo_desde_stock(df_stock_orig, limit=7)
+    return df_stock_orig, df_top_orig, df_top_dest
+
+
+def _cargar_items_a_carro(carro_key: str, filas_df: pd.DataFrame) -> int:
+    """Agrega filas seleccionadas a un carrito de guía evitando duplicados por id_lote."""
+    if carro_key not in st.session_state:
+        st.session_state[carro_key] = []
+    existentes = {it["id_lote"] for it in st.session_state[carro_key]}
+    agregados = 0
+    for _, row_item in filas_df.iterrows():
+        lid = int(row_item["id_lote"])
+        if lid in existentes:
+            continue
+        st.session_state[carro_key].append(
+            {
+                "id_lote": lid,
+                "producto": str(row_item["producto"]),
+                "codigo_lote_proveedor": str(row_item["codigo_lote_proveedor"]),
+                "dias_para_vencer": int(row_item["dias_para_vencer"]),
+                "stock_disponible": float(row_item["stock_disponible"]),
+                "cantidad": float(row_item["stock_disponible"]),
+                "costo_unitario": float(row_item["costo_unitario"]),
+                "subtotal_valor": float(row_item["valor_en_riesgo"]),
+                "unidad_medida": str(row_item["unidad_medida"]),
+            }
+        )
+        existentes.add(lid)
+        agregados += 1
+    return agregados
+
+
+def _render_panel_top7_traslado(
+    df_top: pd.DataFrame,
+    carro_key: str,
+    titulo_html: str,
+    subtitulo_html: str,
+    valor_label: str,
+    accent_color: str,
+    empty_msg: str,
+    df_key: str,
+    sel_key: str,
+    sel_label: str,
+    btn_add_key: str,
+    btn_add_label: str,
+    btn_add_help: str,
+    btn_all_key: str,
+    btn_all_help: str,
+    guia_nombre: str,
+    toast_icon: str,
+) -> None:
+    """Renderiza un panel Top 7 FEFO con selección múltiple por fila y carga al manifiesto."""
+    with st.container(border=True):
+        val_riesgo = df_top["valor_en_riesgo"].sum() if not df_top.empty else 0
+
+        st.markdown(
+            f"""
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div>
+                    <strong style="color:{accent_color}; font-size:1.05rem;">{titulo_html}</strong><br>
+                    <span style="font-size:0.8rem; color:#64748b;">{subtitulo_html}</span>
+                </div>
+                <div style="text-align:right;">
+                    <span style="font-size:0.75rem; color:#64748b;">{valor_label}</span><br>
+                    <strong style="color:{accent_color}; font-size:1rem;">${val_riesgo:,.0f} CLP</strong>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if df_top.empty:
+            st.info(empty_msg)
+            return
+
+        sel_event = st.dataframe(
+            df_top[[
+                "id_lote", "producto", "dias_para_vencer", "estado_alerta",
+                "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
+            ]],
+            use_container_width=True,
+            hide_index=True,
+            height=240,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=df_key,
+            column_config={
+                "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
+                "producto": "Materia Prima",
+                "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
+                "estado_alerta": "Semáforo",
+                "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.2f kg"),
+                "valor_en_riesgo": st.column_config.NumberColumn("Valor Riesgo", format="$%d"),
+                "codigo_lote_proveedor": "Ref.",
+            },
+        )
+        selected_rows = list(sel_event.selection.rows) if sel_event and getattr(sel_event, "selection", None) else []
+
+        lotes_dict = {
+            int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
+            for _, r in df_top.iterrows()
+        }
+
+        col_sel, col_btn1, col_btn2 = st.columns([2.6, 1.2, 1.2])
+        with col_sel:
+            lote_sel = st.selectbox(
+                sel_label,
+                options=list(lotes_dict.keys()),
+                format_func=lambda k: lotes_dict[k],
+                key=sel_key,
+                label_visibility="collapsed",
+            )
+        with col_btn1:
+            add_caption = f"{btn_add_label} ({len(selected_rows)})" if selected_rows else btn_add_label
+            if st.button(add_caption, key=btn_add_key, use_container_width=True, help=btn_add_help):
+                filas_a_cargar = df_top.iloc[selected_rows] if selected_rows else df_top[df_top["id_lote"] == lote_sel]
+                agregados = _cargar_items_a_carro(carro_key, filas_a_cargar)
+                if agregados > 0:
+                    st.toast(f"{toast_icon} Se cargaron {agregados} partida(s) a {guia_nombre}.", icon=toast_icon)
+                else:
+                    st.info(f"Las partidas seleccionadas ya se encuentran cargadas en {guia_nombre}.")
+        with col_btn2:
+            if st.button("⚡ Cargar 7", key=btn_all_key, use_container_width=True, help=btn_all_help):
+                agregados_all = _cargar_items_a_carro(carro_key, df_top)
+                if agregados_all > 0:
+                    st.toast(f"{toast_icon} Se cargaron {agregados_all} partidas críticas a {guia_nombre}.", icon="🚀")
+                else:
+                    st.info(f"Todas las partidas del Top 7 ya están cargadas en {guia_nombre}.")
+
+
+def _limpiar_carros_traslado(*carro_keys: str) -> None:
+    """Callback previo al render del fragmento para vaciar carritos sin rerun extra."""
+    for ck in carro_keys:
+        st.session_state[ck] = []
+
+
+def _render_guia_preview_editor(
+    banner_bg: str,
+    banner_border: str,
+    title_color: str,
+    sub_color: str,
+    titulo: str,
+    ruta_html: str,
+    ref_label: str,
+    ref_default: str,
+    ref_key: str,
+    carro_key: str,
+    empty_msg: str,
+    editor_key: str,
+    qty_col_label: str,
+    total_kg_label: str,
+    clear_label: str,
+    clear_key: str,
+) -> tuple[str, float, float]:
+    """Renderiza el editor de manifiesto para Ida o Retorno y retorna (referencia, tot_kg, tot_val)."""
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div style="background:{banner_bg}; border-left:4px solid {banner_border}; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
+                <strong style="color:{title_color}; font-size:1rem;">{titulo}</strong><br>
+                <span style="font-size:0.8rem; color:{sub_color};">{ruta_html}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        ref_guia = st.text_input(ref_label, value=ref_default, key=ref_key)
+        items = st.session_state[carro_key]
+        if not items:
+            st.info(empty_msg)
+            return ref_guia, 0.0, 0.0
+
+        df_editor = pd.DataFrame(items)
+        edited = st.data_editor(
+            df_editor[[
+                "id_lote", "producto", "dias_para_vencer",
+                "stock_disponible", "cantidad", "subtotal_valor"
+            ]],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key=editor_key,
+            column_config={
+                "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
+                "producto": st.column_config.TextColumn("Insumo", disabled=True),
+                "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
+                "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.2f kg"),
+                "cantidad": st.column_config.NumberColumn(qty_col_label, min_value=0.001, format="%.3f", required=True),
+                "subtotal_valor": st.column_config.NumberColumn("Valor Riesgo", disabled=True, format="$%d"),
+            },
+        )
+        nuevos_items = []
+        for _, r_ed in edited.iterrows():
+            match_orig = next((x for x in items if x["id_lote"] == r_ed["id_lote"]), None)
+            if match_orig:
+                cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
+                match_orig["cantidad"] = cant_real
+                match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
+                nuevos_items.append(match_orig)
+        st.session_state[carro_key] = nuevos_items
+
+        tot_kg = sum(it["cantidad"] for it in nuevos_items)
+        tot_val = sum(it["subtotal_valor"] for it in nuevos_items)
+
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            st.metric(total_kg_label, f"{tot_kg:.2f} kg")
+        with col_t2:
+            st.metric("Capital Rescatado", f"${tot_val:,.0f} CLP")
+
+        st.button(
+            clear_label,
+            key=clear_key,
+            on_click=_limpiar_carros_traslado,
+            args=(carro_key,),
+        )
+
+        return ref_guia, tot_kg, tot_val
+
+
+@st.fragment
+def _render_manifiesto_traslados_fragment(
+    local_traslado_origen_id: int,
+    local_traslado_destino_id: int,
+    nombre_orig_simple: str,
+    nombre_dest_simple: str,
+    df_top_origen: pd.DataFrame,
+    df_top_destino: pd.DataFrame,
+    id_usuario_sesion: Optional[int],
+) -> None:
+    """Fragmento aislado para seleccionar partidas FEFO, ajustar manifiesto y emitir guías."""
+    col_panel_ida, col_panel_vuelta = st.columns(2)
+
+    with col_panel_ida:
+        _render_panel_top7_traslado(
+            df_top=df_top_origen,
+            carro_key="carro_ida_items",
+            titulo_html="🔴 Flete de Ida: Top 7 en Riesgo",
+            subtitulo_html=f"Desde: <b>{nombre_orig_simple}</b> ➡️ Hacia: <b>{nombre_dest_simple}</b>",
+            valor_label="Capital en Riesgo:",
+            accent_color="#e63946",
+            empty_msg="No hay insumos disponibles en el local de origen.",
+            df_key="df_top_origen_sel",
+            sel_key="sel_pin_ida",
+            sel_label="Seleccionar insumo de origen:*",
+            btn_add_key="btn_add_ida",
+            btn_add_label="➕ Cargar",
+            btn_add_help="Agrega la(s) partida(s) marcada(s) o seleccionada(s) a la Guía de Ida.",
+            btn_all_key="btn_add_all_ida",
+            btn_all_help="Agrega las 7 partidas críticas a la Guía de Ida de una sola vez.",
+            guia_nombre="Guía de Ida",
+            toast_icon="📦",
+        )
+
+    with col_panel_vuelta:
+        _render_panel_top7_traslado(
+            df_top=df_top_destino,
+            carro_key="carro_retorno_items",
+            titulo_html="🔄 Retorno Oportuno: Top 7 en Destino",
+            subtitulo_html=f"Aprovechar vuelta desde: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b>",
+            valor_label="Rescatable en Retorno:",
+            accent_color="#0284c7",
+            empty_msg="El local destino no registra partidas críticas para flete de retorno.",
+            df_key="df_top_destino_sel",
+            sel_key="sel_ret_dest",
+            sel_label="Seleccionar insumo de retorno:*",
+            btn_add_key="btn_add_ret",
+            btn_add_label="➕ Retorno",
+            btn_add_help="Agrega la(s) partida(s) marcada(s) o seleccionada(s) a la Guía de Retorno.",
+            btn_all_key="btn_add_all_ret",
+            btn_all_help="Agrega las 7 partidas críticas de destino a la Guía de Retorno.",
+            guia_nombre="Guía de Retorno",
+            toast_icon="🚚",
+        )
+
+    st.markdown("---")
+    st.markdown("#### 📋 Vista Previa de las Guías de Despacho (Manifiesto de Carga)")
+    st.caption(
+        "Detalle consolidado de los movimientos seleccionados para el flete de ida y el retorno optimizado. "
+        "Ajusta cantidades o remueve partidas antes de emitir formalmente las guías."
+    )
+
+    if "carro_ida_items" not in st.session_state:
+        st.session_state["carro_ida_items"] = []
+    if "carro_retorno_items" not in st.session_state:
+        st.session_state["carro_retorno_items"] = []
+
+    col_preview_ida, col_preview_retorno = st.columns(2)
+    ts_now = pd.Timestamp.now().strftime("%Y%m%d%H%M")
+
+    with col_preview_ida:
+        ref_guia_ida, tot_kg_ida, tot_val_ida = _render_guia_preview_editor(
+            banner_bg="#fee2e2",
+            banner_border="#e63946",
+            title_color="#991b1b",
+            sub_color="#7f1d1d",
+            titulo="🔴 Guía de Despacho - IDA",
+            ruta_html=f"Ruta: <b>{nombre_orig_simple}</b> ➡️ <b>{nombre_dest_simple}</b>",
+            ref_label="N° Guía / Referencia de Ida:*",
+            ref_default=f"GT-IDA-{local_traslado_origen_id}{local_traslado_destino_id}-{ts_now}",
+            ref_key="ref_despacho_ida",
+            carro_key="carro_ida_items",
+            empty_msg="No hay partidas cargadas en la Guía de Ida. Marca filas en la tabla o presiona **➕ Cargar** arriba.",
+            editor_key="editor_guia_ida",
+            qty_col_label="A Enviar (kg)",
+            total_kg_label="Total Kilos Ida",
+            clear_label="🗑️ Vaciar Guía de Ida",
+            clear_key="btn_clear_ida",
+        )
+
+    with col_preview_retorno:
+        ref_guia_ret, tot_kg_ret, tot_val_ret = _render_guia_preview_editor(
+            banner_bg="#e0f2fe",
+            banner_border="#0284c7",
+            title_color="#0369a1",
+            sub_color="#0c4a6e",
+            titulo="🔄 Guía de Despacho - RETORNO",
+            ruta_html=f"Ruta: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b> (Aprovechamiento de flete)",
+            ref_label="N° Guía / Referencia de Retorno:*",
+            ref_default=f"GT-RET-{local_traslado_destino_id}{local_traslado_origen_id}-{ts_now}",
+            ref_key="ref_despacho_ret",
+            carro_key="carro_retorno_items",
+            empty_msg="No hay partidas cargadas en la Guía de Retorno. Marca filas en la tabla o presiona **➕ Retorno** arriba.",
+            editor_key="editor_guia_retorno",
+            qty_col_label="A Retornar (kg)",
+            total_kg_label="Total Kilos Retorno",
+            clear_label="🗑️ Vaciar Guía de Retorno",
+            clear_key="btn_clear_ret",
+        )
+
+    hay_ida = len(st.session_state["carro_ida_items"]) > 0
+    hay_ret = len(st.session_state["carro_retorno_items"]) > 0
+
+    if hay_ida or hay_ret:
+        peso_total_flete = tot_kg_ida + tot_kg_ret
+        valor_total_flete = tot_val_ida + tot_val_ret
+        pct_aprovechamiento = 100 if (hay_ida and hay_ret) else 50
+        color_eficiencia = "#16a34a" if pct_aprovechamiento == 100 else "#ea580c"
+
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">RESUMEN LOGÍSTICO DEL VIAJE REDONDO:</span><br>
+                        <strong style="font-size:1.15rem; color:#0f172a;">🚚 Carga Total Movilizada: {peso_total_flete:.2f} kg</strong>
+                    </div>
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">CAPITAL TOTAL RESCATADO:</span><br>
+                        <strong style="font-size:1.15rem; color:#0284c7;">💰 ${valor_total_flete:,.0f} CLP</strong>
+                    </div>
+                    <div>
+                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">APROVECHAMIENTO FLETE:</span><br>
+                        <strong style="font-size:1.15rem; color:{color_eficiencia};">⚖️ {pct_aprovechamiento}% ({'Ida + Retorno Completo' if pct_aprovechamiento == 100 else 'Solo un sentido'})</strong>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            col_firma_c1, col_firma_c2 = st.columns(2)
+            with col_firma_c1:
+                opc_orig_cons, idx_orig_cons = get_opciones_usuarios(int(local_traslado_origen_id), id_usuario_sesion)
+                id_usr_orig_cons = st.selectbox(
+                    f"Responsable Origen ({nombre_orig_simple}):*",
+                    options=list(opc_orig_cons.keys()) if opc_orig_cons else [None],
+                    index=idx_orig_cons,
+                    format_func=lambda k: opc_orig_cons[k] if k is not None else "Operador Central",
+                    key="sel_usr_orig_cons",
+                )
+            with col_firma_c2:
+                opc_dest_cons, idx_dest_cons = get_opciones_usuarios(int(local_traslado_destino_id), id_usuario_sesion)
+                id_usr_dest_cons = st.selectbox(
+                    f"Responsable Destino ({nombre_dest_simple}):*",
+                    options=list(opc_dest_cons.keys()) if opc_dest_cons else [None],
+                    index=idx_dest_cons,
+                    format_func=lambda k: opc_dest_cons[k] if k is not None else "Operador Central",
+                    key="sel_usr_dest_cons",
+                )
+
+            obs_despacho_consolidado = st.text_area(
+                "Protocolo y Condiciones de Transporte (Inocuidad y Cadena de Frío):*",
+                value="Cadena de frío controlada con termómetro digital en hieleras selladas. Transporte directo sin aperturas intermedias.",
+                height=55,
+                key="obs_transporte_cons",
+            )
+
+            col_btn_emision1, col_btn_emision2 = st.columns([2, 1])
+            with col_btn_emision1:
+                if hay_ida and hay_ret:
+                    btn_emitir_global = st.button(
+                        f"🚚 Confirmar y Emitir Ambas Guías ({len(st.session_state['carro_ida_items'])} Ida + {len(st.session_state['carro_retorno_items'])} Retorno)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ambas",
+                    )
+                elif hay_ida:
+                    btn_emitir_global = st.button(
+                        f"🚚 Confirmar y Emitir Guía de Despacho de IDA ({len(st.session_state['carro_ida_items'])} partidas | {tot_kg_ida:.2f} kg)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ida_solo",
+                    )
+                else:
+                    btn_emitir_global = st.button(
+                        f"🔄 Confirmar y Emitir Guía de RETORNO ({len(st.session_state['carro_retorno_items'])} partidas | {tot_kg_ret:.2f} kg)",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_emitir_ret_solo",
+                    )
+
+            with col_btn_emision2:
+                st.button(
+                    "🗑️ Vaciar Todo el Manifiesto",
+                    use_container_width=True,
+                    key="btn_vaciar_todo",
+                    on_click=_limpiar_carros_traslado,
+                    args=("carro_ida_items", "carro_retorno_items"),
+                )
+
+            if btn_emitir_global:
+                try:
+                    res_ida_dict = None
+                    res_ret_dict = None
+
+                    if hay_ida:
+                        res_ida_dict = db.registrar_traslado_consolidado(
+                            id_local_origen=int(local_traslado_origen_id),
+                            id_local_destino=int(local_traslado_destino_id),
+                            partidas=st.session_state["carro_ida_items"],
+                            referencia=ref_guia_ida.strip() or "Guía de Ida",
+                            observaciones=obs_despacho_consolidado.strip() or None,
+                            id_usuario=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
+                            id_usuario_recepcion=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
+                        )
+
+                    if hay_ret:
+                        res_ret_dict = db.registrar_traslado_consolidado(
+                            id_local_origen=int(local_traslado_destino_id),
+                            id_local_destino=int(local_traslado_origen_id),
+                            partidas=st.session_state["carro_retorno_items"],
+                            referencia=ref_guia_ret.strip() or "Guía de Retorno",
+                            observaciones=obs_despacho_consolidado.strip() or None,
+                            id_usuario=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
+                            id_usuario_recepcion=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
+                        )
+
+                    st.session_state["carro_ida_items"] = []
+                    st.session_state["carro_retorno_items"] = []
+                    st.session_state["voucher_traslado_consolidado"] = {
+                        "ida": res_ida_dict,
+                        "retorno": res_ret_dict,
+                        "origen": nombre_orig_simple,
+                        "destino": nombre_dest_simple,
+                        "despacha_orig": opc_orig_cons.get(id_usr_orig_cons, "Operador Central") if id_usr_orig_cons else "Operador Central",
+                        "recibe_dest": opc_dest_cons.get(id_usr_dest_cons, "Operador Central") if id_usr_dest_cons else "Operador Central",
+                    }
+                    id_prim = res_ida_dict["id_movimiento"] if res_ida_dict else res_ret_dict["id_movimiento"]
+                    id_sec = res_ret_dict["id_movimiento"] if (res_ida_dict and res_ret_dict) else None
+                    st.session_state["ultimo_pdf_traslado"] = {
+                        "id_principal": id_prim,
+                        "id_retorno": id_sec,
+                    }
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al emitir el manifiesto consolidado de despacho: {e}")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_resumen_mermas(id_local: Optional[int] = None) -> dict:
+    return db.load_resumen_mermas(id_local=id_local)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_estadisticas_mermas_causa(id_local: Optional[int] = None) -> pd.DataFrame:
+    return db.load_estadisticas_mermas_causa(id_local=id_local)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_historial_mermas(id_local: Optional[int] = None, limit: int = 50) -> pd.DataFrame:
+    return db.load_historial_mermas(id_local=id_local, limit=limit)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_lotes_selector() -> pd.DataFrame:
+    return db.load_lotes_selector()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_trazabilidad_lote(id_lote: int) -> dict:
+    return db.load_trazabilidad_lote(id_lote)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_cola_eventos_sync(id_local: Optional[int] = None, limit: int = 50) -> pd.DataFrame:
+    return db.load_cola_eventos_sync(id_local=id_local, limit=limit)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_listado_documentos_movimiento(
+    categoria: str,
+    id_local: Optional[int],
+    fecha_desde: date,
+    fecha_hasta: date,
+    limit: int = 300,
+) -> pd.DataFrame:
+    return db.load_listado_documentos_movimiento(
+        categoria=categoria,
+        id_local=id_local,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        limit=limit,
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_listado_recepciones(
+    id_local: Optional[int],
+    fecha_desde: date,
+    fecha_hasta: date,
+    limit: int = 300,
+) -> pd.DataFrame:
+    return db.load_listado_recepciones(
+        id_local=id_local,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        limit=limit,
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_reporte_consolidado_movimientos(
+    categoria: str,
+    id_local: Optional[int],
+    fecha_desde: date,
+    fecha_hasta: date,
+) -> pd.DataFrame:
+    return db.load_reporte_consolidado_movimientos(
+        categoria=categoria,
+        id_local=id_local,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_reporte_consolidado_recepciones(
+    id_local: Optional[int],
+    fecha_desde: date,
+    fecha_hasta: date,
+) -> pd.DataFrame:
+    return db.load_reporte_consolidado_recepciones(
+        id_local=id_local,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+    )
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _c_movimiento_pdf(id_movimiento: int) -> dict:
+    return db.get_movimiento_para_pdf(id_movimiento)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _c_recepcion_pdf(id_compra: int) -> dict:
+    return db.get_recepcion_para_pdf(id_compra)
+
+
+def _select_pills(
+    label: str,
+    opciones_dict: dict,
+    key: str,
+    default_key=None,
+    force_key=None,
+    container=st,
+    label_visibility: str = "visible",
+):
+    """
+    Renderiza st.pills de selección única garantizando que nunca quede en None
+    si el usuario vuelve a hacer clic sobre la pastilla activa.
+    """
+    keys_list = list(opciones_dict.keys())
+    if not keys_list:
+        return None
+    fallback = default_key if default_key in opciones_dict else keys_list[0]
+    val_key = f"{key}_val"
+    widget_key = f"{key}_widget"
+
+    if force_key is not None and force_key in opciones_dict:
+        st.session_state[val_key] = force_key
+        st.session_state[widget_key] = force_key
+    elif val_key not in st.session_state or st.session_state[val_key] not in opciones_dict:
+        st.session_state[val_key] = fallback
+
+    if st.session_state.get(widget_key) not in opciones_dict:
+        st.session_state[widget_key] = st.session_state[val_key]
+
+    elegido = container.pills(
+        label,
+        options=keys_list,
+        format_func=lambda k: opciones_dict[k],
+        selection_mode="single",
+        key=widget_key,
+        label_visibility=label_visibility,
+    )
+    if elegido is not None and elegido in opciones_dict:
+        st.session_state[val_key] = elegido
+    return st.session_state[val_key]
+
+
+def _render_quick_pdf_banner(
+    session_key: str,
+    label: str,
+    build_pdf_fn,
+    filename_fn,
+    btn_key: str,
+):
+    """Muestra un botón persistente de descarga PDF para el último documento emitido en la pestaña."""
+    doc_info = st.session_state.get(session_key)
+    if not doc_info:
+        return
+    try:
+        pdf_bytes = build_pdf_fn(doc_info)
+        if not pdf_bytes:
+            return
+        col_pdf_btn, col_pdf_close = st.columns([4, 1])
+        with col_pdf_btn:
+            st.download_button(
+                label=label,
+                data=pdf_bytes,
+                file_name=filename_fn(doc_info),
+                mime="application/pdf",
+                use_container_width=True,
+                key=btn_key,
+            )
+        with col_pdf_close:
+            if st.button("✖️ Ocultar", key=f"{btn_key}_dismiss", use_container_width=True):
+                st.session_state.pop(session_key, None)
+                st.rerun()
+    except Exception as err:
+        st.warning(f"No se pudo generar el PDF inmediato: {err}")
 
 def render_echarts(options: dict, height: int = 280, key: str = "chart"):
     """Renderiza gráficos Apache ECharts nativos con soporte responsivo y animación fluida."""
@@ -840,12 +1595,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Carga de datos base con control de errores
+# Carga de datos base con caché (evita viajes repetidos a Neon en cada clic)
 try:
-    locales_df = db.load_locales()
-    proveedores_df = db.load_proveedores(solo_activos=True)
-    productos_df = db.load_productos(solo_activos=True)
-    usuarios_df = db.load_usuarios(solo_activos=True)
+    locales_df = _c_locales()
+    proveedores_df = _c_proveedores(solo_activos=True)
+    productos_df = _c_productos(solo_activos=True)
+    usuarios_df = _c_usuarios(solo_activos=True)
 except SQLAlchemyError as err:
     st.error(
         f"❌ Error al conectar con PostgreSQL: {err}. "
@@ -873,15 +1628,18 @@ st.sidebar.markdown(
 st.sidebar.markdown("### 🏢 Simulación de Local")
 
 opciones_locales = {"0": "🌐 Vista Consolidada (Administrador)"}
+opciones_locales_pills = {"0": "🌐 Todos (5)"}
 for _, fila in locales_df.iterrows():
-    opciones_locales[str(fila["id_local"])] = f"📍 {fila['nombre']}"
+    lid_str = str(fila["id_local"])
+    opciones_locales[lid_str] = f"📍 {fila['nombre']}"
+    opciones_locales_pills[lid_str] = f"📍 {fila['nombre']}"
 
-seleccion_local_key = st.sidebar.selectbox(
+seleccion_local_key = _select_pills(
     "Local Activo en Pantalla:",
-    options=list(opciones_locales.keys()),
-    format_func=lambda k: opciones_locales[k],
-    index=0,
-    help="Permite emular la perspectiva de un operador de sucursal específica o del Administrador General.",
+    opciones_locales_pills,
+    key="sidebar_local_pills",
+    default_key="0",
+    container=st.sidebar,
 )
 
 id_local_activo: Optional[int] = (
@@ -941,7 +1699,7 @@ else:
 st.sidebar.markdown("---")
 
 # Resumen de métricas en la barra lateral
-metricas = db.load_resumen_metricas(id_local=id_local_activo)
+metricas = _c_resumen_metricas(id_local=id_local_activo)
 st.sidebar.markdown("### 📦 Stock del Local")
 col_s1, col_s2 = st.sidebar.columns(2)
 col_s1.metric("Lotes", metricas["total_lotes"])
@@ -954,6 +1712,10 @@ txt_tot = f"${val_tot / 1_000_000:.1f}M" if val_tot >= 1_000_000 else f"${val_to
 txt_rsk = f"${val_rsk / 1_000_000:.1f}M" if val_rsk >= 1_000_000 else f"${val_rsk / 1000:,.0f}k"
 col_s3.metric("Valor Total", txt_tot)
 col_s4.metric("En Riesgo", txt_rsk)
+
+if st.sidebar.button("🔄 Sincronizar Datos en Vivo", use_container_width=True, help="Limpia la caché local y recarga datos frescos desde PostgreSQL Neon."):
+    st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.caption("Base de datos: **PostgreSQL 18**")
 st.sidebar.caption("Lógica de Despacho: **FEFO / FIFO**")
@@ -1037,23 +1799,30 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Pestañas principales de navegación
-tab_alertas, tab_recepcion, tab_cocina, tab_traslados, tab_mermas, tab_trazabilidad, tab_maestros = st.tabs(
-    [
-        "🚦 Semáforo y Costos en Riesgo",
-        "📥 Recepción de Compras",
-        "🍳 Salidas a Cocina (FEFO)",
-        "🚚 Traspasos entre Locales",
-        "🗑️ Control de Mermas (Bajas)",
-        "🔍 Trazabilidad y Auditoría",
-        "⚙️ Maestros (Catálogos)",
-    ]
+# Navegación principal perezosa (solo ejecuta consultas de la vista activa)
+NAV_MODULOS = {
+    "alertas": "🚦 Semáforo y Costos en Riesgo",
+    "recepcion": "📥 Recepción de Compras",
+    "cocina": "🍳 Salidas a Cocina (FEFO)",
+    "traslados": "🚚 Traspasos entre Locales",
+    "mermas": "🗑️ Control de Mermas (Bajas)",
+    "trazabilidad": "🔍 Trazabilidad y Auditoría",
+    "reportes": "🖨️ Reportes SEREMI (PDF)",
+    "maestros": "⚙️ Maestros (Catálogos)",
+}
+nav_tab = _select_pills(
+    "Módulo Activo:",
+    NAV_MODULOS,
+    key="nav_modulo_principal",
+    default_key="alertas",
+    label_visibility="collapsed",
 )
+st.markdown("<hr style='margin: 4px 0 14px 0; border-color: #e2e8f0;'>", unsafe_allow_html=True)
 
 # ==============================================================================
 # TAB 1: SEMÁFORO Y ALERTAS DE VENCIMIENTO CON VALORIZACIÓN
 # ==============================================================================
-with tab_alertas:
+if nav_tab == "alertas":
     st.markdown("### 🚦 Monitor de Caducidad y Semáforo Financiero de Riesgo")
     st.caption(
         "Detección oportuna de partidas de insumos para priorizar su consumo inmediato "
@@ -1174,7 +1943,7 @@ with tab_alertas:
             unsafe_allow_html=True,
         )
 
-    inventario_df = db.load_inventario_alertas(id_local=id_local_activo)
+    inventario_df = _c_inventario_alertas(id_local=id_local_activo)
 
     # --------------------------------------------------------------------------
     # NUEVA FILA: KPIS DE GESTIÓN Y CONTROL EJECUTIVO (ESTILIZADOS)
@@ -1283,7 +2052,7 @@ with tab_alertas:
             "Permite al chef y al administrador activar 'Sugerencias del Día' para monetizar el stock antes de que venza."
         )
 
-        recetas_activas_df = db.load_recetas(solo_activas=True)
+        recetas_activas_df = _c_recetas(solo_activas=True)
         lotes_urgentes = inventario_df[(inventario_df["dias_para_vencer"] >= 0) & (inventario_df["dias_para_vencer"] <= 7)]
 
         if lotes_urgentes.empty:
@@ -1643,7 +2412,7 @@ with tab_alertas:
 
         col_rv1, col_rv2 = st.columns([1.7, 1.1])
 
-        df_todas_sucursales = db.load_inventario_alertas(id_local=None)
+        df_todas_sucursales = _c_inventario_alertas(id_local=None)
 
         with col_rv1:
             with st.container(border=True):
@@ -1893,7 +2662,7 @@ with tab_alertas:
 # ==============================================================================
 # TAB 2: RECEPCIÓN DE COMPRAS Y GENERACIÓN DE LOTES
 # ==============================================================================
-with tab_recepcion:
+elif nav_tab == "recepcion":
     st.markdown("### 📥 Recepción de Compras y Alta de Lotes")
     st.caption(
         "Ingreso físico de materias primas. Se crea el lote de trazabilidad "
@@ -1917,6 +2686,14 @@ with tab_recepcion:
             """,
             unsafe_allow_html=True,
         )
+
+    _render_quick_pdf_banner(
+        session_key="ultimo_pdf_recepcion",
+        label="🖨️ Descargar Acta de Recepción y Control HACCP (PDF)",
+        build_pdf_fn=lambda info: reportes_pdf.generar_pdf_recepcion(_c_recepcion_pdf(info["id_compra"])),
+        filename_fn=lambda info: f"Acta_Recepcion_{info['id_compra']}.pdf",
+        btn_key="btn_pdf_quick_recepcion",
+    )
 
     with st.container(border=True):
         with st.form("form_recepcion_lote", clear_on_submit=False):
@@ -2050,6 +2827,8 @@ with tab_recepcion:
                     "temperatura": float(temperatura_recepcion),
                     "responsable": opc_usr_rec.get(id_usr_receptor, "Operador Central") if id_usr_receptor else "Operador Central",
                 }
+                st.session_state["ultimo_pdf_recepcion"] = {"id_compra": resultado["id_compra"]}
+                st.cache_data.clear()
                 st.rerun()
             except SQLAlchemyError as err:
                 st.error(f"Error en la base de datos: {err}")
@@ -2059,7 +2838,7 @@ with tab_recepcion:
 # ==============================================================================
 # TAB 3: SALIDAS POR CONSUMO EN COCINA (FEFO Y RECETAS)
 # ==============================================================================
-with tab_cocina:
+elif nav_tab == "cocina":
     st.markdown("### 🍳 Salidas a Cocina y Producción Culinaria")
     st.caption(
         "Control de consumos gastronómicos bajo criterio **FEFO** (First Expired, First Out). "
@@ -2070,12 +2849,11 @@ with tab_cocina:
         local_cocina_id = id_local_activo
         st.info(f"📍 Operando en la cocina del: **{nombre_local_activo}**")
     else:
-        opciones_locales_cocina = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
-        local_cocina_id = st.selectbox(
+        opciones_locales_cocina = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
+        local_cocina_id = _select_pills(
             "Seleccionar Local donde opera la cocina:",
-            options=list(opciones_locales_cocina.keys()),
-            format_func=lambda k: opciones_locales_cocina[k],
-            key="sel_local_cocina",
+            opciones_locales_cocina,
+            key="sel_local_cocina_pills",
         )
 
     # --------------------------------------------------------------------------
@@ -2161,7 +2939,15 @@ with tab_cocina:
                             unsafe_allow_html=True,
                         )
 
-        recetas_raw_df = db.load_recetas(solo_activas=True)
+        _render_quick_pdf_banner(
+            session_key="ultimo_pdf_produccion",
+            label="🖨️ Descargar Acta de Manipulación y Producción en Cocina (PDF)",
+            build_pdf_fn=lambda info: reportes_pdf.generar_pdf_operacion_cocina(_c_movimiento_pdf(info["id_movimiento"])),
+            filename_fn=lambda info: f"Acta_Cocina_{info['id_movimiento']}.pdf",
+            btn_key="btn_pdf_quick_produccion",
+        )
+
+        recetas_raw_df = _c_recetas(solo_activas=True)
         if recetas_raw_df.empty:
             st.warning("⚠️ No hay recetas activas configuradas en la base de datos.")
         else:
@@ -2228,7 +3014,7 @@ with tab_cocina:
                         orden_platos[r_id] = cant
 
                 # Cálculo de requerimientos y stock disponible
-                stock_local_df = db.load_stock_disponible_local(int(local_cocina_id))
+                stock_local_df = _c_stock_disponible_local(int(local_cocina_id))
                 stock_por_prod = (
                     stock_local_df.groupby("id_producto")["stock_disponible"].sum().to_dict()
                     if not stock_local_df.empty
@@ -2304,6 +3090,8 @@ with tab_cocina:
                         )
                         res_prod["responsable"] = opc_chef_prod.get(id_chef_prod, "Operador Central") if id_chef_prod else "Operador Central"
                         st.session_state["voucher_produccion"] = res_prod
+                        st.session_state["ultimo_pdf_produccion"] = {"id_movimiento": res_prod["id_movimiento"]}
+                        st.cache_data.clear()
                         st.rerun()
                     except Exception as err:
                         st.error(f"Error al registrar producción: {err}")
@@ -2334,7 +3122,15 @@ with tab_cocina:
                 unsafe_allow_html=True,
             )
 
-        stock_disp_cocina = db.load_stock_disponible_local(int(local_cocina_id))
+        _render_quick_pdf_banner(
+            session_key="ultimo_pdf_cocina_manual",
+            label="🖨️ Descargar Acta de Salida a Cocina / Manipulación (PDF)",
+            build_pdf_fn=lambda info: reportes_pdf.generar_pdf_operacion_cocina(_c_movimiento_pdf(info["id_movimiento"])),
+            filename_fn=lambda info: f"Acta_Cocina_{info['id_movimiento']}.pdf",
+            btn_key="btn_pdf_quick_cocina_manual",
+        )
+
+        stock_disp_cocina = _c_stock_disponible_local(int(local_cocina_id))
 
         if stock_disp_cocina.empty:
             st.warning("⚠️ Este local no dispone de lotes con existencias positivas para consumir.")
@@ -2426,6 +3222,8 @@ with tab_cocina:
                         "referencia": ref_cocina.strip() or "Consumo estándar",
                         "responsable": opc_chef_man.get(id_chef_man, "Operador Central") if id_chef_man else "Operador Central",
                     }
+                    st.session_state["ultimo_pdf_cocina_manual"] = {"id_movimiento": res_cocina["id_movimiento"]}
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar salida a cocina: {e}")
@@ -2440,7 +3238,7 @@ with tab_cocina:
             "Garantiza trazabilidad forense registrando la fecha/hora física en cocina, la fecha de recepción en la nube y el UUID de idempotencia."
         )
 
-        df_sync = db.load_cola_eventos_sync(id_local=local_cocina_id if id_local_activo else None, limit=50)
+        df_sync = _c_cola_eventos_sync(id_local=local_cocina_id if id_local_activo else None, limit=50)
 
         if df_sync.empty:
             st.info(
@@ -2477,7 +3275,7 @@ with tab_cocina:
 # ==============================================================================
 # TAB 4: TRASPASOS ENTRE LOCALES
 # ==============================================================================
-with tab_traslados:
+elif nav_tab == "traslados":
     st.markdown("### 🚚 Traspaso de Insumos entre Locales")
     st.caption(
         "Redistribución de inventario entre sucursales. El identificador de lote de origen "
@@ -2541,6 +3339,17 @@ with tab_traslados:
             unsafe_allow_html=True,
         )
 
+    _render_quick_pdf_banner(
+        session_key="ultimo_pdf_traslado",
+        label="🖨️ Descargar Guía de Despacho / Traslado (PDF)",
+        build_pdf_fn=lambda info: reportes_pdf.generar_pdf_guia_traslado(
+            _c_movimiento_pdf(info["id_principal"]),
+            _c_movimiento_pdf(info["id_retorno"]) if info.get("id_retorno") else None,
+        ),
+        filename_fn=lambda info: f"Guia_Traslado_{info['id_principal']}.pdf",
+        btn_key="btn_pdf_quick_traslado",
+    )
+
     with st.container(border=True):
         col_t_orig, col_arrow, col_t_dest = st.columns([1, 0.2, 1])
 
@@ -2549,20 +3358,13 @@ with tab_traslados:
                 local_traslado_origen_id = id_local_activo
                 st.text_input("Local de Origen (fijado por sesión):", value=nombre_local_activo, disabled=True)
             else:
-                opciones_locales_traslado = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
-                # Permitir sobreescribir origen si se pinchó un flete de retorno
+                opciones_locales_traslado = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
                 default_origen = st.session_state.pop("traslado_intercambiar_origen", None)
-                if default_origen and default_origen in opciones_locales_traslado:
-                    idx_orig = list(opciones_locales_traslado.keys()).index(default_origen)
-                else:
-                    idx_orig = 0
-
-                local_traslado_origen_id = st.selectbox(
+                local_traslado_origen_id = _select_pills(
                     "Local de Origen (Emisor):*",
-                    options=list(opciones_locales_traslado.keys()),
-                    index=idx_orig,
-                    format_func=lambda k: opciones_locales_traslado[k],
-                    key="sel_local_traslado_origen",
+                    opciones_locales_traslado,
+                    key="sel_local_traslado_origen_pills",
+                    force_key=int(default_origen) if default_origen is not None else None,
                 )
 
         with col_arrow:
@@ -2573,525 +3375,48 @@ with tab_traslados:
 
         with col_t_dest:
             locales_destino_posibles = locales_df[locales_df["id_local"] != int(local_traslado_origen_id)]
-            opciones_destino = {row["id_local"]: row["nombre"] for _, row in locales_destino_posibles.iterrows()}
+            opciones_destino = {int(row["id_local"]): row["nombre"] for _, row in locales_destino_posibles.iterrows()}
             default_destino = st.session_state.pop("traslado_intercambiar_destino", None)
-            if default_destino and default_destino in opciones_destino:
-                idx_dest = list(opciones_destino.keys()).index(default_destino)
-            else:
-                idx_dest = 0
-
-            local_traslado_destino_id = st.selectbox(
+            local_traslado_destino_id = _select_pills(
                 "Local de Destino (Receptor):*",
-                options=list(opciones_destino.keys()),
-                index=idx_dest,
-                format_func=lambda k: opciones_destino[k],
-                key="sel_local_traslado_destino",
+                opciones_destino,
+                key="sel_local_traslado_destino_pills",
+                force_key=int(default_destino) if default_destino is not None else None,
             )
 
-    # Cargar datos de riesgo FEFO para ambos locales (Ida y Retorno)
-    stock_disp_traslado = db.load_stock_disponible_local(int(local_traslado_origen_id))
-    df_top_origen = db.load_top_riesgo_traslado(int(local_traslado_origen_id), limit=7)
-    df_top_destino = db.load_top_riesgo_traslado(int(local_traslado_destino_id), limit=7)
+    # Cargar datos bilaterales en paralelo (Stock + Top 7 Origen derivado + Top 7 Destino)
+    stock_disp_traslado, df_top_origen, df_top_destino = _c_datos_traslado_bilateral(
+        int(local_traslado_origen_id),
+        int(local_traslado_destino_id),
+    )
+
+    nombre_orig_simple = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
+    nombre_dest_simple = opciones_destino.get(local_traslado_destino_id, "Destino")
+
+    ruta_actual = (int(local_traslado_origen_id), int(local_traslado_destino_id))
+    if st.session_state.get("carro_traslado_ruta") != ruta_actual:
+        st.session_state["carro_ida_items"] = []
+        st.session_state["carro_retorno_items"] = []
+        st.session_state["carro_traslado_ruta"] = ruta_actual
 
     # ==========================================================================
-    # TABLAS DE TRASLADO: TOP 7 CRÍTICOS + OPTIMIZACIÓN DE FLETE DE RETORNO
+    # TABLAS DE TRASLADO (FRAGMENTO AISLADO + SELECCIÓN MÚLTIPLE + MANIFIESTO)
     # ==========================================================================
     st.markdown("#### ⚖️ Tablas de Decisión Logística y Optimización de Flete (Backhaul)")
     st.caption(
-        "Monitoreo bilateral de riesgo FEFO. Pincha un producto para transferirlo o aprovecha "
-        "el flete de regreso para rescatar insumos críticos del local destino."
+        "Monitoreo bilateral de riesgo FEFO. Marca una o varias filas (checkbox izquierdo) y presiona Cargar, "
+        "o aprovecha el flete de regreso para rescatar insumos críticos del local destino."
     )
 
-    col_panel_ida, col_panel_vuelta = st.columns(2)
-
-    # PANEL 1: FLETE DE IDA (ORIGEN -> DESTINO)
-    with col_panel_ida:
-        with st.container(border=True):
-            nombre_orig_simple = opciones_locales.get(str(local_traslado_origen_id), "Origen").replace("📍 ", "")
-            nombre_dest_simple = opciones_destino.get(local_traslado_destino_id, "Destino")
-            
-            val_riesgo_orig = df_top_origen["valor_en_riesgo"].sum() if not df_top_origen.empty else 0
-            kg_riesgo_orig = df_top_origen["stock_disponible"].sum() if not df_top_origen.empty else 0
-
-            st.markdown(
-                f"""
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                    <div>
-                        <strong style="color:#e63946; font-size:1.05rem;">🔴 Flete de Ida: Top 7 en Riesgo</strong><br>
-                        <span style="font-size:0.8rem; color:#64748b;">Desde: <b>{nombre_orig_simple}</b> ➡️ Hacia: <b>{nombre_dest_simple}</b></span>
-                    </div>
-                    <div style="text-align:right;">
-                        <span style="font-size:0.75rem; color:#64748b;">Capital en Riesgo:</span><br>
-                        <strong style="color:#e63946; font-size:1rem;">${val_riesgo_orig:,.0f} CLP</strong>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            if df_top_origen.empty:
-                st.info("No hay insumos disponibles en el local de origen.")
-            else:
-                # Tabla interactiva con dataframe
-                st.dataframe(
-                    df_top_origen[[
-                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
-                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=240,
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
-                        "producto": "Materia Prima",
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
-                        "estado_alerta": "Semáforo",
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.2f kg"),
-                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Riesgo", format="$%d"),
-                        "codigo_lote_proveedor": "Ref.",
-                    }
-                )
-
-                # Selector rápido / Cargar a Guía de Ida
-                lotes_ida_dict = {
-                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
-                    for _, r in df_top_origen.iterrows()
-                }
-                
-                col_pin_sel, col_pin_btn1, col_pin_btn2 = st.columns([3, 1.2, 1.2])
-                with col_pin_sel:
-                    lote_pin_ida = st.selectbox(
-                        "Seleccionar insumo de origen:*",
-                        options=list(lotes_ida_dict.keys()),
-                        format_func=lambda k: lotes_ida_dict[k],
-                        key="sel_pin_ida",
-                        label_visibility="collapsed",
-                    )
-                with col_pin_btn1:
-                    if st.button("➕ Cargar", key="btn_add_ida", use_container_width=True, help="Agrega esta partida a la vista previa de la Guía de Ida."):
-                        row_ida = df_top_origen[df_top_origen["id_lote"] == lote_pin_ida].iloc[0]
-                        if "carro_ida_items" not in st.session_state:
-                            st.session_state["carro_ida_items"] = []
-                        if not any(it["id_lote"] == lote_pin_ida for it in st.session_state["carro_ida_items"]):
-                            st.session_state["carro_ida_items"].append({
-                                "id_lote": int(row_ida["id_lote"]),
-                                "producto": str(row_ida["producto"]),
-                                "codigo_lote_proveedor": str(row_ida["codigo_lote_proveedor"]),
-                                "dias_para_vencer": int(row_ida["dias_para_vencer"]),
-                                "stock_disponible": float(row_ida["stock_disponible"]),
-                                "cantidad": float(row_ida["stock_disponible"]),
-                                "costo_unitario": float(row_ida["costo_unitario"]),
-                                "subtotal_valor": float(row_ida["valor_en_riesgo"]),
-                                "unidad_medida": str(row_ida["unidad_medida"]),
-                            })
-                            st.toast(f"✅ #{lote_pin_ida} {row_ida['producto']} agregado a Guía de Ida.", icon="📦")
-                            st.rerun()
-                        else:
-                            st.info("Esta partida ya se encuentra cargada en la Guía de Ida.")
-                with col_pin_btn2:
-                    if st.button("⚡ Cargar 7", key="btn_add_all_ida", use_container_width=True, help="Agrega las 7 partidas críticas a la Guía de Ida de una sola vez."):
-                        if "carro_ida_items" not in st.session_state:
-                            st.session_state["carro_ida_items"] = []
-                        agregados = 0
-                        for _, row_ida in df_top_origen.iterrows():
-                            lid = int(row_ida["id_lote"])
-                            if not any(it["id_lote"] == lid for it in st.session_state["carro_ida_items"]):
-                                st.session_state["carro_ida_items"].append({
-                                    "id_lote": lid,
-                                    "producto": str(row_ida["producto"]),
-                                    "codigo_lote_proveedor": str(row_ida["codigo_lote_proveedor"]),
-                                    "dias_para_vencer": int(row_ida["dias_para_vencer"]),
-                                    "stock_disponible": float(row_ida["stock_disponible"]),
-                                    "cantidad": float(row_ida["stock_disponible"]),
-                                    "costo_unitario": float(row_ida["costo_unitario"]),
-                                    "subtotal_valor": float(row_ida["valor_en_riesgo"]),
-                                    "unidad_medida": str(row_ida["unidad_medida"]),
-                                })
-                                agregados += 1
-                        if agregados > 0:
-                            st.toast(f"✅ Se cargaron {agregados} partidas críticas a la Guía de Ida.", icon="🚀")
-                            st.rerun()
-
-    # PANEL 2: OPTIMIZACIÓN DE RETORNO / BACKHAUL (DESTINO -> ORIGEN)
-    with col_panel_vuelta:
-        with st.container(border=True):
-            val_riesgo_dest = df_top_destino["valor_en_riesgo"].sum() if not df_top_destino.empty else 0
-            kg_riesgo_dest = df_top_destino["stock_disponible"].sum() if not df_top_destino.empty else 0
-
-            st.markdown(
-                f"""
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                    <div>
-                        <strong style="color:#0284c7; font-size:1.05rem;">🔄 Retorno Oportuno: Top 7 en Destino</strong><br>
-                        <span style="font-size:0.8rem; color:#64748b;">Aprovechar vuelta desde: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b></span>
-                    </div>
-                    <div style="text-align:right;">
-                        <span style="font-size:0.75rem; color:#64748b;">Rescatable en Retorno:</span><br>
-                        <strong style="color:#0284c7; font-size:1rem;">${val_riesgo_dest:,.0f} CLP</strong>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            if df_top_destino.empty:
-                st.info("El local destino no registra partidas críticas para flete de retorno.")
-            else:
-                st.dataframe(
-                    df_top_destino[[
-                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
-                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=240,
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
-                        "producto": "Materia Prima",
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
-                        "estado_alerta": "Semáforo",
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.2f kg"),
-                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Riesgo", format="$%d"),
-                        "codigo_lote_proveedor": "Ref.",
-                    }
-                )
-
-                lotes_vuelta_dict = {
-                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.2f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
-                    for _, r in df_top_destino.iterrows()
-                }
-
-                col_ret_sel, col_ret_btn1, col_ret_btn2 = st.columns([2.6, 1.2, 1.2])
-                with col_ret_sel:
-                    lote_ret_sel = st.selectbox(
-                        "Seleccionar insumo de retorno:*",
-                        options=list(lotes_vuelta_dict.keys()),
-                        format_func=lambda k: lotes_vuelta_dict[k],
-                        key="sel_ret_dest",
-                        label_visibility="collapsed",
-                    )
-                with col_ret_btn1:
-                    if st.button("➕ Retorno", key="btn_add_ret", use_container_width=True, help="Agrega esta partida a la vista previa de la Guía de Retorno."):
-                        row_ret = df_top_destino[df_top_destino["id_lote"] == lote_ret_sel].iloc[0]
-                        if "carro_retorno_items" not in st.session_state:
-                            st.session_state["carro_retorno_items"] = []
-                        if not any(it["id_lote"] == lote_ret_sel for it in st.session_state["carro_retorno_items"]):
-                            st.session_state["carro_retorno_items"].append({
-                                "id_lote": int(row_ret["id_lote"]),
-                                "producto": str(row_ret["producto"]),
-                                "codigo_lote_proveedor": str(row_ret["codigo_lote_proveedor"]),
-                                "dias_para_vencer": int(row_ret["dias_para_vencer"]),
-                                "stock_disponible": float(row_ret["stock_disponible"]),
-                                "cantidad": float(row_ret["stock_disponible"]),
-                                "costo_unitario": float(row_ret["costo_unitario"]),
-                                "subtotal_valor": float(row_ret["valor_en_riesgo"]),
-                                "unidad_medida": str(row_ret["unidad_medida"]),
-                            })
-                            st.toast(f"🔄 #{lote_ret_sel} {row_ret['producto']} agregado a Guía de Retorno.", icon="🚚")
-                            st.rerun()
-                        else:
-                            st.info("Esta partida ya se encuentra cargada en la Guía de Retorno.")
-                with col_ret_btn2:
-                    if st.button("⚡ Cargar 7", key="btn_add_all_ret", use_container_width=True, help="Agrega las 7 partidas críticas de destino a la Guía de Retorno."):
-                        if "carro_retorno_items" not in st.session_state:
-                            st.session_state["carro_retorno_items"] = []
-                        agregados_ret = 0
-                        for _, row_ret in df_top_destino.iterrows():
-                            lid = int(row_ret["id_lote"])
-                            if not any(it["id_lote"] == lid for it in st.session_state["carro_retorno_items"]):
-                                st.session_state["carro_retorno_items"].append({
-                                    "id_lote": lid,
-                                    "producto": str(row_ret["producto"]),
-                                    "codigo_lote_proveedor": str(row_ret["codigo_lote_proveedor"]),
-                                    "dias_para_vencer": int(row_ret["dias_para_vencer"]),
-                                    "stock_disponible": float(row_ret["stock_disponible"]),
-                                    "cantidad": float(row_ret["stock_disponible"]),
-                                    "costo_unitario": float(row_ret["costo_unitario"]),
-                                    "subtotal_valor": float(row_ret["valor_en_riesgo"]),
-                                    "unidad_medida": str(row_ret["unidad_medida"]),
-                                })
-                                agregados_ret += 1
-                        if agregados_ret > 0:
-                            st.toast(f"🔄 Se cargaron {agregados_ret} partidas a la Guía de Retorno.", icon="🚀")
-                            st.rerun()
-
-    # ==========================================================================
-    # SECCIÓN: VISTA PREVIA Y MANIFIESTO DE GUÍAS DE DESPACHO (DOS TABLAS)
-    # ==========================================================================
-    st.markdown("---")
-    st.markdown("#### 📋 Vista Previa de las Guías de Despacho (Manifiesto de Carga)")
-    st.caption(
-        "Detalle consolidado de los movimientos seleccionados para el flete de ida y el retorno optimizado. "
-        "Ajusta cantidades o remueve partidas antes de emitir formalmente las guías."
+    _render_manifiesto_traslados_fragment(
+        local_traslado_origen_id=int(local_traslado_origen_id),
+        local_traslado_destino_id=int(local_traslado_destino_id),
+        nombre_orig_simple=nombre_orig_simple,
+        nombre_dest_simple=nombre_dest_simple,
+        df_top_origen=df_top_origen,
+        df_top_destino=df_top_destino,
+        id_usuario_sesion=id_usuario_sesion,
     )
-
-    if "carro_ida_items" not in st.session_state:
-        st.session_state["carro_ida_items"] = []
-    if "carro_retorno_items" not in st.session_state:
-        st.session_state["carro_retorno_items"] = []
-
-    col_preview_ida, col_preview_retorno = st.columns(2)
-
-    # PREVIEW TABLA 1: GUÍA DE DESPACHO - IDA
-    with col_preview_ida:
-        with st.container(border=True):
-            st.markdown(
-                f"""
-                <div style="background:#fee2e2; border-left:4px solid #e63946; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
-                    <strong style="color:#991b1b; font-size:1rem;">🔴 Guía de Despacho - IDA</strong><br>
-                    <span style="font-size:0.8rem; color:#7f1d1d;">Ruta: <b>{nombre_orig_simple}</b> ➡️ <b>{nombre_dest_simple}</b></span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            ref_def_ida = f"GT-IDA-{local_traslado_origen_id}{local_traslado_destino_id}-{pd.Timestamp.now().strftime('%Y%m%d%H%M')}"
-            ref_guia_ida = st.text_input("N° Guía / Referencia de Ida:*", value=ref_def_ida, key="ref_despacho_ida")
-
-            items_ida = st.session_state["carro_ida_items"]
-            if not items_ida:
-                st.info("No hay partidas cargadas en la Guía de Ida. Selecciona y presiona **➕ Cargar** en el panel superior izquierdo.")
-                tot_kg_ida = 0.0
-                tot_val_ida = 0.0
-            else:
-                df_editor_ida = pd.DataFrame(items_ida)
-                edited_ida = st.data_editor(
-                    df_editor_ida[[
-                        "id_lote", "producto", "dias_para_vencer",
-                        "stock_disponible", "cantidad", "subtotal_valor"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    num_rows="dynamic",
-                    key="editor_guia_ida",
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
-                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.2f kg"),
-                        "cantidad": st.column_config.NumberColumn("A Enviar (kg)", min_value=0.001, format="%.3f", required=True),
-                        "subtotal_valor": st.column_config.NumberColumn("Valor Riesgo", disabled=True, format="$%d"),
-                    }
-                )
-                nuevos_items_ida = []
-                for _, r_ed in edited_ida.iterrows():
-                    match_orig = next((x for x in items_ida if x["id_lote"] == r_ed["id_lote"]), None)
-                    if match_orig:
-                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
-                        match_orig["cantidad"] = cant_real
-                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
-                        nuevos_items_ida.append(match_orig)
-                st.session_state["carro_ida_items"] = nuevos_items_ida
-
-                tot_kg_ida = sum(it["cantidad"] for it in nuevos_items_ida)
-                tot_val_ida = sum(it["subtotal_valor"] for it in nuevos_items_ida)
-
-                col_tot_i1, col_tot_i2 = st.columns(2)
-                with col_tot_i1:
-                    st.metric("Total Kilos Ida", f"{tot_kg_ida:.2f} kg")
-                with col_tot_i2:
-                    st.metric("Capital Rescatado", f"${tot_val_ida:,.0f} CLP")
-
-                if st.button("🗑️ Vaciar Guía de Ida", key="btn_clear_ida"):
-                    st.session_state["carro_ida_items"] = []
-                    st.rerun()
-
-    # PREVIEW TABLA 2: GUÍA DE DESPACHO - RETORNO (BACKHAUL)
-    with col_preview_retorno:
-        with st.container(border=True):
-            st.markdown(
-                f"""
-                <div style="background:#e0f2fe; border-left:4px solid #0284c7; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
-                    <strong style="color:#0369a1; font-size:1rem;">🔄 Guía de Despacho - RETORNO</strong><br>
-                    <span style="font-size:0.8rem; color:#0c4a6e;">Ruta: <b>{nombre_dest_simple}</b> ➡️ <b>{nombre_orig_simple}</b> (Aprovechamiento de flete)</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            ref_def_ret = f"GT-RET-{local_traslado_destino_id}{local_traslado_origen_id}-{pd.Timestamp.now().strftime('%Y%m%d%H%M')}"
-            ref_guia_ret = st.text_input("N° Guía / Referencia de Retorno:*", value=ref_def_ret, key="ref_despacho_ret")
-
-            items_ret = st.session_state["carro_retorno_items"]
-            if not items_ret:
-                st.info("No hay partidas cargadas en la Guía de Retorno. Selecciona y presiona **➕ Retorno** en el panel superior derecho.")
-                tot_kg_ret = 0.0
-                tot_val_ret = 0.0
-            else:
-                df_editor_ret = pd.DataFrame(items_ret)
-                edited_ret = st.data_editor(
-                    df_editor_ret[[
-                        "id_lote", "producto", "dias_para_vencer",
-                        "stock_disponible", "cantidad", "subtotal_valor"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    num_rows="dynamic",
-                    key="editor_guia_retorno",
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
-                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.2f kg"),
-                        "cantidad": st.column_config.NumberColumn("A Retornar (kg)", min_value=0.001, format="%.3f", required=True),
-                        "subtotal_valor": st.column_config.NumberColumn("Valor Riesgo", disabled=True, format="$%d"),
-                    }
-                )
-                nuevos_items_ret = []
-                for _, r_ed in edited_ret.iterrows():
-                    match_orig = next((x for x in items_ret if x["id_lote"] == r_ed["id_lote"]), None)
-                    if match_orig:
-                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
-                        match_orig["cantidad"] = cant_real
-                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
-                        nuevos_items_ret.append(match_orig)
-                st.session_state["carro_retorno_items"] = nuevos_items_ret
-
-                tot_kg_ret = sum(it["cantidad"] for it in nuevos_items_ret)
-                tot_val_ret = sum(it["subtotal_valor"] for it in nuevos_items_ret)
-
-                col_tot_r1, col_tot_r2 = st.columns(2)
-                with col_tot_r1:
-                    st.metric("Total Kilos Retorno", f"{tot_kg_ret:.2f} kg")
-                with col_tot_r2:
-                    st.metric("Capital Rescatado", f"${tot_val_ret:,.0f} CLP")
-
-                if st.button("🗑️ Vaciar Guía de Retorno", key="btn_clear_ret"):
-                    st.session_state["carro_retorno_items"] = []
-                    st.rerun()
-
-    # PANEL HORIZONTAL: BALANCE LOGÍSTICO Y EMISIÓN CONSOLIDADA
-    hay_ida = len(st.session_state["carro_ida_items"]) > 0
-    hay_ret = len(st.session_state["carro_retorno_items"]) > 0
-
-    if hay_ida or hay_ret:
-        peso_total_flete = tot_kg_ida + tot_kg_ret
-        valor_total_flete = tot_val_ida + tot_val_ret
-        pct_aprovechamiento = 100 if (hay_ida and hay_ret) else 50
-        color_eficiencia = "#16a34a" if pct_aprovechamiento == 100 else "#ea580c"
-
-        with st.container(border=True):
-            st.markdown(
-                f"""
-                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
-                    <div>
-                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">RESUMEN LOGÍSTICO DEL VIAJE REDONDO:</span><br>
-                        <strong style="font-size:1.15rem; color:#0f172a;">🚚 Carga Total Movilizada: {peso_total_flete:.2f} kg</strong>
-                    </div>
-                    <div>
-                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">CAPITAL TOTAL RESCATADO:</span><br>
-                        <strong style="font-size:1.15rem; color:#0284c7;">💰 ${valor_total_flete:,.0f} CLP</strong>
-                    </div>
-                    <div>
-                        <span style="font-size:0.85rem; color:#64748b; font-weight:600;">APROVECHAMIENTO FLETE:</span><br>
-                        <strong style="font-size:1.15rem; color:{color_eficiencia};">⚖️ {pct_aprovechamiento}% ({'Ida + Retorno Completo' if pct_aprovechamiento == 100 else 'Solo un sentido'})</strong>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            col_firma_c1, col_firma_c2 = st.columns(2)
-            with col_firma_c1:
-                opc_orig_cons, idx_orig_cons = get_opciones_usuarios(int(local_traslado_origen_id), id_usuario_sesion)
-                id_usr_orig_cons = st.selectbox(
-                    f"Responsable Origen ({nombre_orig_simple}):*",
-                    options=list(opc_orig_cons.keys()) if opc_orig_cons else [None],
-                    index=idx_orig_cons,
-                    format_func=lambda k: opc_orig_cons[k] if k is not None else "Operador Central",
-                    key="sel_usr_orig_cons",
-                )
-            with col_firma_c2:
-                opc_dest_cons, idx_dest_cons = get_opciones_usuarios(int(local_traslado_destino_id), id_usuario_sesion)
-                id_usr_dest_cons = st.selectbox(
-                    f"Responsable Destino ({nombre_dest_simple}):*",
-                    options=list(opc_dest_cons.keys()) if opc_dest_cons else [None],
-                    index=idx_dest_cons,
-                    format_func=lambda k: opc_dest_cons[k] if k is not None else "Operador Central",
-                    key="sel_usr_dest_cons",
-                )
-
-            obs_despacho_consolidado = st.text_area(
-                "Protocolo y Condiciones de Transporte (Inocuidad y Cadena de Frío):*",
-                value="Cadena de frío controlada con termómetro digital en hieleras selladas. Transporte directo sin aperturas intermedias.",
-                height=55,
-                key="obs_transporte_cons"
-            )
-
-            col_btn_emision1, col_btn_emision2 = st.columns([2, 1])
-            with col_btn_emision1:
-                if hay_ida and hay_ret:
-                    btn_emitir_global = st.button(
-                        f"🚚 Confirmar y Emitir Ambas Guías ({len(st.session_state['carro_ida_items'])} Ida + {len(st.session_state['carro_retorno_items'])} Retorno)",
-                        type="primary",
-                        use_container_width=True,
-                        key="btn_emitir_ambas"
-                    )
-                elif hay_ida:
-                    btn_emitir_global = st.button(
-                        f"🚚 Confirmar y Emitir Guía de Despacho de IDA ({len(st.session_state['carro_ida_items'])} partidas | {tot_kg_ida:.2f} kg)",
-                        type="primary",
-                        use_container_width=True,
-                        key="btn_emitir_ida_solo"
-                    )
-                else:
-                    btn_emitir_global = st.button(
-                        f"🔄 Confirmar y Emitir Guía de RETORNO ({len(st.session_state['carro_retorno_items'])} partidas | {tot_kg_ret:.2f} kg)",
-                        type="primary",
-                        use_container_width=True,
-                        key="btn_emitir_ret_solo"
-                    )
-
-            with col_btn_emision2:
-                if st.button("🗑️ Vaciar Todo el Manifiesto", use_container_width=True, key="btn_vaciar_todo"):
-                    st.session_state["carro_ida_items"] = []
-                    st.session_state["carro_retorno_items"] = []
-                    st.rerun()
-
-            if btn_emitir_global:
-                try:
-                    res_ida_dict = None
-                    res_ret_dict = None
-
-                    # Emitir Ida si hay ítems
-                    if hay_ida:
-                        res_ida_dict = db.registrar_traslado_consolidado(
-                            id_local_origen=int(local_traslado_origen_id),
-                            id_local_destino=int(local_traslado_destino_id),
-                            partidas=st.session_state["carro_ida_items"],
-                            referencia=ref_guia_ida.strip() or "Guía de Ida",
-                            observaciones=obs_despacho_consolidado.strip() or None,
-                            id_usuario=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
-                            id_usuario_recepcion=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
-                        )
-
-                    # Emitir Retorno si hay ítems (roles origen/destino invertidos físicamente)
-                    if hay_ret:
-                        res_ret_dict = db.registrar_traslado_consolidado(
-                            id_local_origen=int(local_traslado_destino_id),
-                            id_local_destino=int(local_traslado_origen_id),
-                            partidas=st.session_state["carro_retorno_items"],
-                            referencia=ref_guia_ret.strip() or "Guía de Retorno",
-                            observaciones=obs_despacho_consolidado.strip() or None,
-                            id_usuario=int(id_usr_dest_cons) if id_usr_dest_cons is not None else None,
-                            id_usuario_recepcion=int(id_usr_orig_cons) if id_usr_orig_cons is not None else None,
-                        )
-
-                    # Limpiar carritos
-                    st.session_state["carro_ida_items"] = []
-                    st.session_state["carro_retorno_items"] = []
-
-                    st.session_state["voucher_traslado_consolidado"] = {
-                        "ida": res_ida_dict,
-                        "retorno": res_ret_dict,
-                        "origen": nombre_orig_simple,
-                        "destino": nombre_dest_simple,
-                        "despacha_orig": opc_orig_cons.get(id_usr_orig_cons, "Operador Central") if id_usr_orig_cons else "Operador Central",
-                        "recibe_dest": opc_dest_cons.get(id_usr_dest_cons, "Operador Central") if id_usr_dest_cons else "Operador Central",
-                    }
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error al emitir el manifiesto consolidado de despacho: {e}")
 
     # ==========================================================================
     # MODALIDAD DE TRASLADO INDIVIDUAL DE RESPALDO (MANUAL)
@@ -3211,47 +3536,51 @@ with tab_traslados:
                         "despachado_por": opc_orig_man.get(id_usr_orig_man, "Operador Central") if id_usr_orig_man else "Operador Central",
                         "recibido_por": opc_dest_man.get(id_usr_dest_man, "Operador Central") if id_usr_dest_man else "Operador Central",
                     }
+                    st.session_state["ultimo_pdf_traslado"] = {
+                        "id_principal": res_tr["id_movimiento"],
+                        "id_retorno": None,
+                    }
+                    st.cache_data.clear()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar el traslado manual: {e}")
 
-    # Visualización en vivo de los últimos traslados en esta misma pestaña
+    # Visualización bajo demanda de los últimos traslados en esta misma pestaña
     st.markdown("---")
     st.markdown("#### 📋 Historial de Traslados entre Sucursales")
-    st.caption("Verificación de las transferencias registradas en la base de datos.")
-    hist_traslados = db.load_historial_movimientos(id_local=None, limit=20)
-    hist_traslados = hist_traslados[hist_traslados["tipo"].str.contains("Traslado", na=False)]
-    if hist_traslados.empty:
-        st.info("Aún no se han ejecutado traslados entre sucursales.")
-    else:
-        st.dataframe(
-            hist_traslados[[
-                "id_movimiento", "fecha_movimiento", "local_origen", "local_destino",
-                "despachado_por", "recibido_por",
-                "producto", "codigo_lote_proveedor", "cantidad", "unidad_medida", "referencia", "observaciones"
-            ]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "id_movimiento": "N° Guía",
-                "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
-                "local_origen": "Local Origen (Desde)",
-                "local_destino": "Local Destino (Hacia)",
-                "despachado_por": "Despachó",
-                "recibido_por": "Recibió",
-                "producto": "Materia Prima",
-                "codigo_lote_proveedor": "Lote Prov.",
-                "cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
-                "unidad_medida": "Unidad",
-                "referencia": "Referencia",
-                "observaciones": "Observaciones",
-            },
-        )
+    if st.toggle("Ver últimos 20 traslados registrados", value=False, key="toggle_hist_traslados"):
+        hist_traslados = _c_historial_movimientos(id_local=None, limit=20, tipo_movimiento="traslado")
+        if hist_traslados.empty:
+            st.info("Aún no se han ejecutado traslados entre sucursales.")
+        else:
+            st.dataframe(
+                hist_traslados[[
+                    "id_movimiento", "fecha_movimiento", "local_origen", "local_destino",
+                    "despachado_por", "recibido_por",
+                    "producto", "codigo_lote_proveedor", "cantidad", "unidad_medida", "referencia", "observaciones"
+                ]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id_movimiento": "N° Guía",
+                    "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
+                    "local_origen": "Local Origen (Desde)",
+                    "local_destino": "Local Destino (Hacia)",
+                    "despachado_por": "Despachó",
+                    "recibido_por": "Recibió",
+                    "producto": "Materia Prima",
+                    "codigo_lote_proveedor": "Lote Prov.",
+                    "cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                    "unidad_medida": "Unidad",
+                    "referencia": "Referencia",
+                    "observaciones": "Observaciones",
+                },
+            )
 
 # ==============================================================================
 # TAB 5: CONTROL DE MERMAS Y BAJAS (CONTROL DE COSTOS INACAP 4.5%)
 # ==============================================================================
-with tab_mermas:
+elif nav_tab == "mermas":
     st.markdown("### 🗑️ Gestión y Control de Mermas de Materias Primas")
     st.caption(
         "Protocolo formal de baja y descarte para erradicar pérdidas no controladas (4,5% de costos "
@@ -3300,7 +3629,15 @@ with tab_mermas:
             unsafe_allow_html=True,
         )
 
-    resumen_mermas = db.load_resumen_mermas(id_local=id_local_activo)
+    _render_quick_pdf_banner(
+        session_key="ultimo_pdf_merma",
+        label="🖨️ Descargar Acta Oficial de Baja por Merma (PDF)",
+        build_pdf_fn=lambda info: reportes_pdf.generar_pdf_acta_merma(_c_movimiento_pdf(info["id_movimiento"])),
+        filename_fn=lambda info: f"Acta_Merma_{info['id_movimiento']}.pdf",
+        btn_key="btn_pdf_quick_merma",
+    )
+
+    resumen_mermas = _c_resumen_mermas(id_local=id_local_activo)
 
     c_m1, c_m2, c_m3 = st.columns(3)
     with c_m1:
@@ -3341,12 +3678,11 @@ with tab_mermas:
         local_merma_id = id_local_activo
         st.info(f"📍 Registrando baja por merma para: **{nombre_local_activo}**")
     else:
-        opciones_locales_merma = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
-        local_merma_id = st.selectbox(
+        opciones_locales_merma = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
+        local_merma_id = _select_pills(
             "Seleccionar Local donde ocurrió la merma:*",
-            options=list(opciones_locales_merma.keys()),
-            format_func=lambda k: opciones_locales_merma[k],
-            key="sel_local_merma",
+            opciones_locales_merma,
+            key="sel_local_merma_pills",
         )
 
     if st.session_state.get("carro_merma_local_id") != int(local_merma_id):
@@ -3372,7 +3708,7 @@ with tab_mermas:
         })
         return True
 
-    df_lotes_merma = db.load_top_riesgo_traslado(int(local_merma_id), limit=200)
+    df_lotes_merma = _c_top_riesgo_traslado(int(local_merma_id), limit=200)
 
     if df_lotes_merma.empty:
         st.warning("No hay lotes con existencias activas en este local para declarar mermas.")
@@ -3633,6 +3969,8 @@ with tab_mermas:
                             )
                             st.session_state["carro_merma_items"] = []
                             st.session_state["voucher_merma_consolidado"] = res_mc
+                            st.session_state["ultimo_pdf_merma"] = {"id_movimiento": res_mc["id_movimiento"]}
+                            st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error al procesar la baja consolidada por merma: {e}")
@@ -3647,7 +3985,7 @@ with tab_mermas:
         "Permite priorizar intervenciones operativas (mantención de frío, compras FEFO o capacitación en porcionado)."
     )
 
-    df_est_causas = db.load_estadisticas_mermas_causa(id_local=id_local_activo)
+    df_est_causas = _c_estadisticas_mermas_causa(id_local=id_local_activo)
 
     if not df_est_causas.empty and df_est_causas["costo_total_perdida"].sum() > 0:
         col_graf_m, col_tbl_m = st.columns([1.2, 1.3])
@@ -3747,7 +4085,7 @@ with tab_mermas:
     st.markdown("#### 📋 Libro de Actas de Merma y Desecho")
     st.caption("Registro forense de todas las bajas efectuadas para el control de pérdidas del negocio.")
 
-    hist_mermas = db.load_historial_mermas(id_local=id_local_activo, limit=50)
+    hist_mermas = _c_historial_mermas(id_local=id_local_activo, limit=50)
 
     if hist_mermas.empty:
         st.info("No se registran actas de merma para el filtro seleccionado.")
@@ -3778,7 +4116,7 @@ with tab_mermas:
 # ==============================================================================
 # TAB 6: TRAZABILIDAD POR LOTE CON LÍNEA DE TIEMPO VISUAL
 # ==============================================================================
-with tab_trazabilidad:
+elif nav_tab == "trazabilidad":
     st.markdown("### 🔍 Expediente de Trazabilidad y Auditoría")
     st.caption(
         "Auditoría integral del ciclo de vida de cada lote: desde la compra al proveedor, "
@@ -3788,7 +4126,7 @@ with tab_trazabilidad:
     subtab_expediente, subtab_historial = st.tabs(["📦 Ficha de Trazabilidad por Lote", "📋 Registro Global de Movimientos"])
 
     with subtab_expediente:
-        lotes_disponibles = db.load_lotes_selector()
+        lotes_disponibles = _c_lotes_selector()
         if lotes_disponibles.empty:
             st.info("No existen lotes registrados en la base de datos.")
         else:
@@ -3806,7 +4144,7 @@ with tab_trazabilidad:
                 )
 
             if lote_id_sel:
-                trazabilidad = db.load_trazabilidad_lote(lote_id_sel)
+                trazabilidad = _c_trazabilidad_lote(lote_id_sel)
                 if not trazabilidad:
                     st.warning("No se pudo cargar la información del lote seleccionado.")
                 else:
@@ -3842,6 +4180,15 @@ with tab_trazabilidad:
                         </div>
                         """,
                         unsafe_allow_html=True,
+                    )
+
+                    st.download_button(
+                        label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info['id_lote']} (PDF)",
+                        data=reportes_pdf.generar_pdf_expediente_lote(trazabilidad),
+                        file_name=f"Expediente_SEREMI_Lote_{info['id_lote']}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"btn_pdf_exp_lote_{info['id_lote']}",
                     )
 
                     # Timeline Stepper Visual (Línea de Vida del Lote)
@@ -3936,7 +4283,7 @@ with tab_trazabilidad:
         st.markdown("#### 📋 Libro de Movimientos de Inventario (Últimas Operaciones)")
         st.caption("Bitácora cronológica de traslados entre sucursales y despachos para consumo en cocina.")
 
-        historial_df = db.load_historial_movimientos(id_local=id_local_activo, limit=50)
+        historial_df = _c_historial_movimientos(id_local=id_local_activo, limit=50)
 
         if historial_df.empty:
             st.info("No se han registrado movimientos todavía en la base de datos.")
@@ -3965,9 +4312,348 @@ with tab_trazabilidad:
             )
 
 # ==============================================================================
-# TAB 7: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
+# TAB 7: CENTRO DE REPORTES Y TRAZABILIDAD SEREMI (PDF)
 # ==============================================================================
-with tab_maestros:
+elif nav_tab == "reportes":
+    st.markdown("### 🖨️ Centro de Reportes y Trazabilidad Sanitaria SEREMI (PDF)")
+    st.caption(
+        "Emisión oficial de actas y libros auditables en PDF con trazabilidad completa de lotes, "
+        "temperaturas HACCP, proveedores y manipuladores responsables en cada etapa."
+    )
+
+    REP_TIPOS = {
+        "merma": "🗑️ Actas de Merma (Crítico)",
+        "cocina": "🍳 Operaciones Cocina (FEFO)",
+        "traslado": "🚚 Guías de Traslado",
+        "recepcion": "📥 Recepciones (HACCP)",
+        "lote": "📦 Expediente por Lote",
+    }
+
+    with st.container(border=True):
+        rep_tipo = _select_pills(
+            "Tipo de Documento / Auditoría SEREMI:",
+            REP_TIPOS,
+            key="rep_sel_tipo_pills",
+            default_key="merma",
+        )
+        col_rf2, col_rf3, col_rf4 = st.columns([2.0, 0.9, 0.9])
+        with col_rf2:
+            if id_local_activo:
+                rep_local_id = id_local_activo
+                rep_local_label = nombre_local_activo
+                st.text_input("Sucursal:", value=nombre_local_activo, disabled=True, key="rep_loc_locked")
+            else:
+                opc_rep_locales = {0: "🌐 Todas"}
+                for _, r_loc in locales_df.iterrows():
+                    opc_rep_locales[int(r_loc["id_local"])] = r_loc["nombre"]
+                sel_rep_loc = _select_pills(
+                    "Sucursal:",
+                    opc_rep_locales,
+                    key="rep_sel_local_pills",
+                    default_key=0,
+                )
+                rep_local_id = None if sel_rep_loc == 0 else sel_rep_loc
+                rep_local_label = opc_rep_locales[sel_rep_loc]
+        with col_rf3:
+            rep_desde = st.date_input(
+                "Desde:",
+                value=date.today() - timedelta(days=30),
+                key="rep_fecha_desde",
+            )
+        with col_rf4:
+            rep_hasta = st.date_input(
+                "Hasta:",
+                value=date.today(),
+                key="rep_fecha_hasta",
+            )
+
+    if rep_desde > rep_hasta:
+        st.error("⚠️ La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
+    elif rep_tipo == "lote":
+        lotes_rep_df = _c_lotes_selector()
+        if lotes_rep_df.empty:
+            st.info("No hay lotes registrados en la base de datos.")
+        else:
+            opc_lotes_rep = {
+                int(row["id_lote"]): row["display_label"]
+                for _, row in lotes_rep_df.iterrows()
+            }
+            lote_rep_sel = st.selectbox(
+                "Selecciona el Lote para generar su Expediente Completo SEREMI:",
+                options=list(opc_lotes_rep.keys()),
+                format_func=lambda k: opc_lotes_rep[k],
+                key="rep_sel_lote_e2e",
+            )
+            traz_rep = _c_trazabilidad_lote(lote_rep_sel)
+            if traz_rep:
+                info_l = traz_rep["info"]
+                movs_l = traz_rep["movimientos"]
+                stock_l = traz_rep["stock_locales"]
+                c_l1, c_l2, c_l3, c_l4 = st.columns(4)
+                c_l1.metric("Proveedor", str(info_l["proveedor"])[:24])
+                c_l2.metric("Temp. Ingreso HACCP", f"{float(info_l.get('temperatura_recepcion', 2.0)):.1f} °C")
+                c_l3.metric("Recepcionado por", str(info_l.get("recibido_por", "Operador Central")))
+                c_l4.metric("Eventos en Cadena", f"{len(movs_l)} mov.")
+
+                st.download_button(
+                    label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info_l['id_lote']} (PDF)",
+                    data=reportes_pdf.generar_pdf_expediente_lote(traz_rep),
+                    file_name=f"Expediente_SEREMI_Lote_{info_l['id_lote']}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"rep_btn_pdf_lote_{info_l['id_lote']}",
+                )
+                if not movs_l.empty:
+                    st.markdown("##### 👥 Manipuladores y Custodia del Lote")
+                    st.dataframe(movs_l, use_container_width=True, hide_index=True)
+                if not stock_l.empty:
+                    st.markdown("##### 📦 Stock Remanente por Sucursal")
+                    st.dataframe(stock_l, use_container_width=True, hide_index=True)
+    else:
+        REP_CONFIG = {
+            "merma": {
+                "id_col": "id_movimiento",
+                "folio_pref": "Acta",
+                "file_pref": "Acta_Merma",
+                "libro_name": "Libro_Mermas_SEREMI",
+                "pdf_fn": reportes_pdf.generar_pdf_acta_merma,
+                "detail_fn": _c_movimiento_pdf,
+                "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "responsable", "rol_responsable", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total", "observaciones"],
+                "col_cfg": {
+                    "id_movimiento": "N° Acta",
+                    "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
+                    "local_origen": "Sucursal",
+                    "responsable": "Responsable Baja",
+                    "rol_responsable": "Rol",
+                    "referencia": "Causa Raíz",
+                    "productos_resumen": "Productos",
+                    "total_lotes": "Lotes",
+                    "total_cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                    "costo_total": st.column_config.NumberColumn("Pérdida ($)", format="$%d"),
+                    "observaciones": "Justificación",
+                },
+            },
+            "cocina": {
+                "id_col": "id_movimiento",
+                "folio_pref": "Orden Cocina",
+                "file_pref": "Acta_Cocina",
+                "libro_name": "Bitacora_Cocina_SEREMI",
+                "pdf_fn": reportes_pdf.generar_pdf_operacion_cocina,
+                "detail_fn": _c_movimiento_pdf,
+                "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "responsable", "rol_responsable", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total", "observaciones"],
+                "col_cfg": {
+                    "id_movimiento": "Folio",
+                    "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
+                    "local_origen": "Sucursal",
+                    "responsable": "Manipulador / Chef",
+                    "rol_responsable": "Rol",
+                    "referencia": "Comanda / Turno",
+                    "productos_resumen": "Insumos Manipulados",
+                    "total_lotes": "Lotes",
+                    "total_cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                    "costo_total": st.column_config.NumberColumn("Costo ($)", format="$%d"),
+                    "observaciones": "Observaciones",
+                },
+            },
+            "traslado": {
+                "id_col": "id_movimiento",
+                "folio_pref": "Guía",
+                "file_pref": "Guia_Traslado",
+                "libro_name": "Libro_Traslados_SEREMI",
+                "pdf_fn": reportes_pdf.generar_pdf_guia_traslado,
+                "detail_fn": _c_movimiento_pdf,
+                "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "local_destino", "responsable", "receptor", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total"],
+                "col_cfg": {
+                    "id_movimiento": "N° Guía",
+                    "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
+                    "local_origen": "Origen",
+                    "local_destino": "Destino",
+                    "responsable": "Despachó",
+                    "receptor": "Recibió",
+                    "referencia": "Referencia",
+                    "productos_resumen": "Productos",
+                    "total_lotes": "Lotes",
+                    "total_cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                    "costo_total": st.column_config.NumberColumn("Valor Ref. ($)", format="$%d"),
+                },
+            },
+            "recepcion": {
+                "id_col": "id_compra",
+                "folio_pref": "Recepción",
+                "file_pref": "Acta_Recepcion",
+                "libro_name": "Registro_Recepciones_HACCP_SEREMI",
+                "pdf_fn": reportes_pdf.generar_pdf_recepcion,
+                "detail_fn": _c_recepcion_pdf,
+                "cols": ["id_compra", "fecha_recepcion", "tipo_documento", "numero_documento", "proveedor", "rut_proveedor", "local_receptor", "recibido_por", "productos_resumen", "total_lotes", "total_cantidad", "temp_max", "monto_total"],
+                "col_cfg": {
+                    "id_compra": "Folio",
+                    "fecha_recepcion": st.column_config.DateColumn("Fecha Rec.", format="DD/MM/YYYY"),
+                    "tipo_documento": "Tipo Doc.",
+                    "numero_documento": "N° Doc.",
+                    "proveedor": "Proveedor",
+                    "rut_proveedor": "RUT",
+                    "local_receptor": "Sucursal",
+                    "recibido_por": "Recepcionó",
+                    "productos_resumen": "Productos",
+                    "total_lotes": "Lotes",
+                    "total_cantidad": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                    "temp_max": st.column_config.NumberColumn("T° Máx", format="%.1f °C"),
+                    "monto_total": st.column_config.NumberColumn("Total ($)", format="$%d"),
+                },
+            },
+        }
+        cfg = REP_CONFIG[rep_tipo]
+
+        if rep_tipo == "recepcion":
+            df_docs = _c_listado_recepciones(
+                id_local=rep_local_id,
+                fecha_desde=rep_desde,
+                fecha_hasta=rep_hasta,
+                limit=300,
+            )
+            df_consolidado = _c_reporte_consolidado_recepciones(
+                id_local=rep_local_id,
+                fecha_desde=rep_desde,
+                fecha_hasta=rep_hasta,
+            )
+        else:
+            df_docs = _c_listado_documentos_movimiento(
+                categoria=rep_tipo,
+                id_local=rep_local_id,
+                fecha_desde=rep_desde,
+                fecha_hasta=rep_hasta,
+                limit=300,
+            )
+            df_consolidado = _c_reporte_consolidado_movimientos(
+                categoria=rep_tipo,
+                id_local=rep_local_id,
+                fecha_desde=rep_desde,
+                fecha_hasta=rep_hasta,
+            )
+
+        filtro_txt = st.text_input(
+            "🔎 Búsqueda rápida (folio, manipulador, proveedor, producto, causa o referencia):",
+            placeholder="Ej. Carlos Mendoza, Salmón, Vencimiento, FAC-...",
+            key="rep_filtro_texto",
+        ).strip()
+
+        if filtro_txt and not df_docs.empty:
+            mask = df_docs.astype(str).apply(lambda col: col.str.contains(filtro_txt, case=False, na=False)).any(axis=1)
+            df_docs = df_docs[mask]
+            if not df_docs.empty and not df_consolidado.empty:
+                ids_filtrados = set(df_docs[cfg["id_col"]].tolist())
+                df_consolidado = df_consolidado[df_consolidado[cfg["id_col"]].isin(ids_filtrados)]
+
+        if df_docs.empty:
+            st.info("No se encontraron documentos para los filtros y rango de fechas seleccionados.")
+        else:
+            col_rk1, col_rk2, col_rk3, col_rk4 = st.columns([1, 1, 1, 1.6])
+            col_rk1.metric("Documentos / Folios", f"{len(df_docs)}")
+            col_rk2.metric("Total Lotes", f"{int(df_docs['total_lotes'].sum())}")
+            col_rk3.metric("Volumen Total", f"{float(df_docs['total_cantidad'].sum()):,.2f}")
+            with col_rk4:
+                libro_bytes = reportes_pdf.generar_pdf_libro_consolidado(
+                    tipo=rep_tipo,
+                    df=df_consolidado,
+                    sucursal_label=rep_local_label,
+                    fecha_desde=rep_desde,
+                    fecha_hasta=rep_hasta,
+                )
+                st.download_button(
+                    label="📚 Descargar Libro Consolidado del Período (PDF)",
+                    data=libro_bytes,
+                    file_name=f"{cfg['libro_name']}_{rep_desde.strftime('%Y%m%d')}_{rep_hasta.strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"btn_libro_{rep_tipo}",
+                )
+
+            st.dataframe(
+                df_docs[cfg["cols"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config=cfg["col_cfg"],
+            )
+
+            st.markdown("---")
+            st.markdown("#### 📄 Emisión y Vista Previa de Documento Individual (PDF)")
+
+            id_col = cfg["id_col"]
+            opc_folios = {}
+            for _, r_doc in df_docs.iterrows():
+                fid = int(r_doc[id_col])
+                if rep_tipo == "recepcion":
+                    etiq = (
+                        f"{cfg['folio_pref']} #{fid} | {r_doc['fecha_recepcion']} | "
+                        f"{r_doc['tipo_documento']} {r_doc['numero_documento']} | "
+                        f"{r_doc['proveedor']} | Recibió: {r_doc['recibido_por']}"
+                    )
+                elif rep_tipo == "traslado":
+                    etiq = (
+                        f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
+                        f"{r_doc['local_origen']} ➡️ {r_doc['local_destino']} | "
+                        f"Despachó: {r_doc['responsable']} / Recibió: {r_doc['receptor']}"
+                    )
+                else:
+                    etiq = (
+                        f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
+                        f"{r_doc['local_origen']} | Resp.: {r_doc['responsable']} | {r_doc['referencia']}"
+                    )
+                opc_folios[fid] = etiq
+
+            col_sel_doc, col_btn_doc = st.columns([2.5, 1.2])
+            with col_sel_doc:
+                folio_sel = st.selectbox(
+                    "Selecciona el folio a imprimir en PDF:",
+                    options=list(opc_folios.keys()),
+                    format_func=lambda k: opc_folios[k],
+                    key=f"rep_sel_folio_{rep_tipo}",
+                )
+
+            doc_data = cfg["detail_fn"](folio_sel)
+            if doc_data:
+                with col_btn_doc:
+                    st.write("")
+                    st.write("")
+                    st.download_button(
+                        label=f"🖨️ Imprimir {cfg['folio_pref']} #{folio_sel} (PDF)",
+                        data=cfg["pdf_fn"](doc_data),
+                        file_name=f"{cfg['file_pref']}_{folio_sel}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"btn_print_ind_{rep_tipo}_{folio_sel}",
+                    )
+
+                cab_p = doc_data["cabecera"]
+                items_p = doc_data["items"]
+                with st.expander(f"👁️ Vista previa de trazabilidad — {cfg['folio_pref']} #{folio_sel}", expanded=True):
+                    if rep_tipo == "recepcion":
+                        st.markdown(
+                            f"**Proveedor:** {cab_p['proveedor']} (`{cab_p['rut_proveedor']}`) | "
+                            f"**Doc:** {cab_p['tipo_documento']} `{cab_p['numero_documento']}` | "
+                            f"**Recepcionado por:** `{cab_p['recibido_por']}` ({cab_p['rol_receptor']})"
+                        )
+                    elif rep_tipo == "traslado":
+                        st.markdown(
+                            f"**Ruta:** {cab_p['local_origen']} ➡️ {cab_p['local_destino']} | "
+                            f"**Despachó:** `{cab_p['responsable_origen']}` | **Recibió:** `{cab_p['responsable_destino']}`"
+                        )
+                    else:
+                        st.markdown(
+                            f"**Sucursal:** {cab_p['local_origen']} | "
+                            f"**Manipulador / Responsable:** `{cab_p['responsable_origen']}` ({cab_p['rol_origen']}) | "
+                            f"**Referencia:** `{cab_p['referencia']}`"
+                        )
+                    if cab_p.get("observaciones"):
+                        st.caption(f"Observaciones: {cab_p['observaciones']}")
+                    st.dataframe(items_p, use_container_width=True, hide_index=True)
+
+# ==============================================================================
+# TAB 8: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
+# ==============================================================================
+elif nav_tab == "maestros":
     st.markdown("### ⚙️ Administración de Catálogos Maestros")
     st.caption(
         "Mantenimiento centralizado de proveedores y materias primas. "
@@ -3987,7 +4673,7 @@ with tab_maestros:
     # SUBTAB: PROVEEDORES
     # --------------------------------------------------------------------------
     with subtab_m_prov:
-        todos_prov_df = db.load_proveedores(solo_activos=False)
+        todos_prov_df = _c_proveedores(solo_activos=False)
 
         col_p_tbl, col_p_act = st.columns([1.5, 1])
 
@@ -4048,6 +4734,7 @@ with tab_maestros:
                                     activo=p_act,
                                 )
                                 st.success(f"✅ Proveedor creado con éxito con ID #{nuevo_id_prov}.")
+                                st.cache_data.clear()
                                 st.rerun()
                             except Exception as err:
                                 st.error(f"Error al registrar proveedor: {err}")
@@ -4096,6 +4783,7 @@ with tab_maestros:
                                         activo=ed_act,
                                     )
                                     st.success(f"✅ Proveedor #{prov_id_edit} actualizado con éxito.")
+                                    st.cache_data.clear()
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Error al actualizar proveedor: {err}")
@@ -4104,7 +4792,7 @@ with tab_maestros:
     # SUBTAB: PRODUCTOS
     # --------------------------------------------------------------------------
     with subtab_m_prod:
-        todos_prod_df = db.load_productos(solo_activos=False)
+        todos_prod_df = _c_productos(solo_activos=False)
 
         col_pr_tbl, col_pr_act = st.columns([1.5, 1])
 
@@ -4162,6 +4850,7 @@ with tab_maestros:
                                     activo=pr_act,
                                 )
                                 st.success(f"✅ Producto creado con éxito con ID #{nuevo_id_prod}.")
+                                st.cache_data.clear()
                                 st.rerun()
                             except Exception as err:
                                 st.error(f"Error al registrar producto: {err}")
@@ -4207,6 +4896,7 @@ with tab_maestros:
                                         activo=ed_pr_act,
                                     )
                                     st.success(f"✅ Producto #{prod_id_edit} actualizado con éxito.")
+                                    st.cache_data.clear()
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Error al actualizar producto: {err}")
@@ -4221,8 +4911,8 @@ with tab_maestros:
             "Garantiza el control de costos culinarios, la trazabilidad higiénica y la consistencia en todos los locales."
         )
 
-        recetas_cat_df = db.load_recetas_catalogo(solo_activas=False)
-        recetas_det_df = db.load_recetas(solo_activas=False)
+        recetas_cat_df = _c_recetas_catalogo(solo_activas=False)
+        recetas_det_df = _c_recetas(solo_activas=False)
 
         if recetas_cat_df.empty:
             st.info("No hay recetas registradas en el catálogo maestro.")
@@ -4270,7 +4960,7 @@ with tab_maestros:
     # SUBTAB: USUARIOS Y PERSONAL OPERATIVO (TRAZABILIDAD Y FIRMA PIN)
     # --------------------------------------------------------------------------
     with subtab_m_usuarios:
-        todos_usr_df = db.load_usuarios(solo_activos=False)
+        todos_usr_df = _c_usuarios(solo_activos=False)
 
         col_u_tbl, col_u_act = st.columns([1.5, 1])
 
@@ -4360,6 +5050,7 @@ with tab_maestros:
                                     activo=u_act,
                                 )
                                 st.success(f"Personal registrado exitosamente con ID {nuevo_id_usr} (PIN: {u_pin}).")
+                                st.cache_data.clear()
                                 st.rerun()
                             except Exception as ex_u:
                                 st.error(f"Error al registrar usuario: {str(ex_u)}")
@@ -4422,6 +5113,7 @@ with tab_maestros:
                                         activo=e_u_act,
                                     )
                                     st.success(f"Usuario {e_u_nom} actualizado correctamente.")
+                                    st.cache_data.clear()
                                     st.rerun()
                                 except Exception as ex_mod_u:
                                     st.error(f"Error al actualizar usuario: {str(ex_mod_u)}")

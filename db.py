@@ -1071,9 +1071,8 @@ def registrar_merma_consolidada(
     id_usuario: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Registra una baja consolidada multi-lote por merma en una sola transacción atómica.
-    Crea 1 cabecera en movimientos (referencia 'MERMA: <causa>') y N detalles en detalle_movimiento,
-    descontando stock_lote_local y calculando la pérdida financiera total.
+    Registra una baja consolidada multi-lote por merma en una sola transacción atómica,
+    utilizando consultas vectorizadas (ANY / UNNEST) para minimizar round-trips de red.
     """
     if not partidas:
         raise ValueError("Debe incluir al menos un lote para procesar el acta de baja por merma.")
@@ -1092,96 +1091,64 @@ def registrar_merma_consolidada(
         if item.get("observaciones"):
             obs_por_lote[lid] = item.get("observaciones")
 
-    with engine.begin() as conn:
-        referencia_merma = f"MERMA: {motivo_limpio}"
-        q_insert_mov = text(
-            """
-            INSERT INTO movimientos (
-                tipo_movimiento, id_local_origen, id_local_destino,
-                id_usuario, referencia, observaciones, estado
-            )
-            VALUES (
-                'salida_cocina', :id_local, NULL,
-                :id_usuario, :referencia, :observaciones, 'confirmado'
-            )
-            RETURNING id_movimiento;
-            """
-        )
-        id_movimiento = conn.execute(
-            q_insert_mov,
-            {
-                "id_local": id_local,
-                "id_usuario": id_usuario,
-                "referencia": referencia_merma,
-                "observaciones": observaciones,
-            },
-        ).scalar_one()
+    lote_ids = list(cantidades_por_lote.keys())
 
-        q_stock = text(
+    with engine.begin() as conn:
+        # 1. Bloquear y validar todos los lotes en un único viaje SQL (ordenados para evitar deadlocks)
+        q_stock_batch = text(
             """
-            SELECT s.cantidad, dc.costo_unitario, p.nombre AS producto, p.unidad_medida, l.codigo_lote_proveedor
+            SELECT
+                s.id_lote,
+                s.cantidad,
+                dc.costo_unitario,
+                p.nombre AS producto,
+                p.unidad_medida,
+                l.codigo_lote_proveedor
             FROM stock_lote_local AS s
             JOIN lotes AS l ON l.id_lote = s.id_lote
             JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
             JOIN productos AS p ON p.id_producto = dc.id_producto
-            WHERE s.id_lote = :id_lote AND s.id_local = :id_local
+            WHERE s.id_local = :id_local
+              AND s.id_lote = ANY(:lote_ids)
+            ORDER BY s.id_lote
             FOR UPDATE OF s
             """
         )
-        q_insert_det = text(
-            """
-            INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
-            VALUES (:id_movimiento, :id_lote, :cantidad, :observaciones);
-            """
-        )
-        q_update_stock = text(
-            """
-            UPDATE stock_lote_local
-            SET cantidad = :nuevo_stock, actualizado_en = CURRENT_TIMESTAMP
-            WHERE id_lote = :id_lote AND id_local = :id_local
-            """
-        )
+        rows = conn.execute(
+            q_stock_batch, {"id_local": id_local, "lote_ids": lote_ids}
+        ).fetchall()
+        stock_map = {int(r[0]): r for r in rows}
 
         detalles_procesados = []
         total_kilos = 0.0
         costo_total_perdida = 0.0
+        cantidades_list = []
+        obs_list = []
 
-        for id_lote, cantidad in cantidades_por_lote.items():
-            row = conn.execute(q_stock, {"id_lote": id_lote, "id_local": id_local}).first()
+        for id_lote in lote_ids:
+            cantidad = cantidades_por_lote[id_lote]
+            row = stock_map.get(id_lote)
             if not row:
                 raise ValueError(f"El lote #{id_lote} no cuenta con existencias registradas en este local.")
 
-            stock_actual = float(row[0])
-            costo_unitario = float(row[1]) if row[1] is not None else 0.0
-            producto = row[2]
-            unidad_medida = row[3]
-            codigo_lote_prov = row[4]
+            stock_actual = float(row[1])
+            costo_unitario = float(row[2]) if row[2] is not None else 0.0
+            producto = row[3]
+            unidad_medida = row[4]
+            codigo_lote_prov = row[5]
 
             if stock_actual < cantidad:
                 raise ValueError(
                     f"Stock insuficiente en lote #{id_lote} ({producto}): disponible {stock_actual:.3f}, a descartar {cantidad:.3f}."
                 )
 
-            obs_item = obs_por_lote.get(id_lote) or observaciones
-            conn.execute(
-                q_insert_det,
-                {
-                    "id_movimiento": id_movimiento,
-                    "id_lote": id_lote,
-                    "cantidad": cantidad,
-                    "observaciones": obs_item,
-                },
-            )
-
             nuevo_stock = stock_actual - cantidad
-            conn.execute(
-                q_update_stock,
-                {"nuevo_stock": nuevo_stock, "id_lote": id_lote, "id_local": id_local},
-            )
-
             costo_perdida = cantidad * costo_unitario
             total_kilos += cantidad
             costo_total_perdida += costo_perdida
+            cantidades_list.append(cantidad)
+            obs_list.append(obs_por_lote.get(id_lote) or observaciones)
+
             detalles_procesados.append(
                 {
                     "id_lote": id_lote,
@@ -1194,6 +1161,72 @@ def registrar_merma_consolidada(
                     "nuevo_stock": nuevo_stock,
                 }
             )
+
+        # 2. Insertar cabecera en movimientos
+        referencia_merma = f"MERMA: {motivo_limpio}"
+        id_movimiento = conn.execute(
+            text(
+                """
+                INSERT INTO movimientos (
+                    tipo_movimiento, id_local_origen, id_local_destino,
+                    id_usuario, referencia, observaciones, estado
+                )
+                VALUES (
+                    'salida_cocina', :id_local, NULL,
+                    :id_usuario, :referencia, :observaciones, 'confirmado'
+                )
+                RETURNING id_movimiento;
+                """
+            ),
+            {
+                "id_local": id_local,
+                "id_usuario": id_usuario,
+                "referencia": referencia_merma,
+                "observaciones": observaciones,
+            },
+        ).scalar_one()
+
+        # 3. Insertar todos los detalles en lote
+        conn.execute(
+            text(
+                """
+                INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
+                SELECT :id_movimiento, u.id_lote, u.cantidad, u.obs
+                FROM unnest(
+                    CAST(:lote_ids AS bigint[]),
+                    CAST(:cantidades AS numeric[]),
+                    CAST(:obs_list AS text[])
+                ) AS u(id_lote, cantidad, obs);
+                """
+            ),
+            {
+                "id_movimiento": id_movimiento,
+                "lote_ids": lote_ids,
+                "cantidades": cantidades_list,
+                "obs_list": obs_list,
+            },
+        )
+
+        # 4. Descontar stock en lote
+        conn.execute(
+            text(
+                """
+                UPDATE stock_lote_local AS s
+                SET cantidad = s.cantidad - u.cantidad,
+                    actualizado_en = CURRENT_TIMESTAMP
+                FROM unnest(
+                    CAST(:lote_ids AS bigint[]),
+                    CAST(:cantidades AS numeric[])
+                ) AS u(id_lote, cantidad)
+                WHERE s.id_lote = u.id_lote AND s.id_local = :id_local;
+                """
+            ),
+            {
+                "id_local": id_local,
+                "lote_ids": lote_ids,
+                "cantidades": cantidades_list,
+            },
+        )
 
         return {
             "id_movimiento": id_movimiento,
@@ -1452,32 +1485,77 @@ def registrar_traslado_consolidado(
 ) -> Dict[str, Any]:
     """
     Registra un traslado consolidado multi-lote entre dos sucursales en una sola transacción atómica,
-    con trazabilidad dual de usuario despachador y usuario receptor.
-    Crea 1 registro cabecera en movimientos y N detalles en detalle_movimiento.
-    Actualiza atómicamente el stock de origen y destino para cada lote garantizando integridad referencial.
+    utilizando consultas vectorizadas (ANY / UNNEST) para procesar N partidas en 5 viajes SQL fijos.
     """
     if id_local_origen == id_local_destino:
         raise ValueError("El local de destino debe ser diferente al local de origen.")
     if not partidas:
         raise ValueError("Debe incluir al menos una partida para emitir la guía de traslado.")
 
+    cantidades_por_lote: Dict[int, float] = {}
+    obs_por_lote: Dict[int, Optional[str]] = {}
+    for item in partidas:
+        lid = int(item["id_lote"])
+        cant = float(item["cantidad"])
+        if cant <= 0:
+            raise ValueError(f"La cantidad para el lote #{lid} debe ser mayor a 0.")
+        cantidades_por_lote[lid] = cantidades_por_lote.get(lid, 0.0) + cant
+        if item.get("observaciones"):
+            obs_por_lote[lid] = item.get("observaciones")
+
+    lote_ids = list(cantidades_por_lote.keys())
+
     with engine.begin() as conn:
-        # 1. Registrar cabecera del movimiento de tipo 'traslado'
-        q_insert_mov = text(
-            """
-            INSERT INTO movimientos (
-                tipo_movimiento, id_local_origen, id_local_destino,
-                id_usuario, id_usuario_recepcion, referencia, observaciones, estado
-            )
-            VALUES (
-                'traslado', :id_local_origen, :id_local_destino,
-                :id_usuario, :id_usuario_recepcion, :referencia, :observaciones, 'confirmado'
-            )
-            RETURNING id_movimiento;
-            """
-        )
+        # 1. Bloquear y validar stock en origen para todos los lotes en 1 consulta
+        rows_stock = conn.execute(
+            text(
+                """
+                SELECT id_lote, cantidad
+                FROM stock_lote_local
+                WHERE id_local = :id_local_origen
+                  AND id_lote = ANY(:lote_ids)
+                ORDER BY id_lote
+                FOR UPDATE
+                """
+            ),
+            {"id_local_origen": id_local_origen, "lote_ids": lote_ids},
+        ).fetchall()
+        stock_map = {int(r[0]): float(r[1]) for r in rows_stock}
+
+        detalles_procesados = []
+        cantidades_list = []
+        obs_list = []
+        total_kg = 0.0
+
+        for id_lote in lote_ids:
+            cantidad = cantidades_por_lote[id_lote]
+            if id_lote not in stock_map:
+                raise ValueError(f"El lote #{id_lote} no cuenta con registro de stock en el local de origen.")
+            stock_origen = stock_map[id_lote]
+            if stock_origen < cantidad:
+                raise ValueError(
+                    f"Stock insuficiente para lote #{id_lote}: disponible {stock_origen:.3f}, a trasladar {cantidad:.3f}."
+                )
+            cantidades_list.append(cantidad)
+            obs_list.append(obs_por_lote.get(id_lote) or observaciones)
+            total_kg += cantidad
+            detalles_procesados.append({"id_lote": id_lote, "cantidad": cantidad})
+
+        # 2. Registrar cabecera del movimiento de tipo 'traslado'
         id_movimiento = conn.execute(
-            q_insert_mov,
+            text(
+                """
+                INSERT INTO movimientos (
+                    tipo_movimiento, id_local_origen, id_local_destino,
+                    id_usuario, id_usuario_recepcion, referencia, observaciones, estado
+                )
+                VALUES (
+                    'traslado', :id_local_origen, :id_local_destino,
+                    :id_usuario, :id_usuario_recepcion, :referencia, :observaciones, 'confirmado'
+                )
+                RETURNING id_movimiento;
+                """
+            ),
             {
                 "id_local_origen": id_local_origen,
                 "id_local_destino": id_local_destino,
@@ -1488,88 +1566,69 @@ def registrar_traslado_consolidado(
             },
         ).scalar_one()
 
-        detalles_procesados = []
-        total_kg = 0.0
-
-        for item in partidas:
-            id_lote = int(item["id_lote"])
-            cantidad = float(item["cantidad"])
-            obs_item = item.get("observaciones") or observaciones
-
-            if cantidad <= 0:
-                raise ValueError(f"La cantidad para el lote #{id_lote} debe ser mayor a 0.")
-
-            # Validar y bloquear stock en origen
-            q_stock = text(
-                """
-                SELECT cantidad
-                FROM stock_lote_local
-                WHERE id_lote = :id_lote AND id_local = :id_local_origen
-                FOR UPDATE
-                """
-            )
-            row = conn.execute(
-                q_stock, {"id_lote": id_lote, "id_local_origen": id_local_origen}
-            ).first()
-            if not row:
-                raise ValueError(f"El lote #{id_lote} no cuenta con registro de stock en el local de origen.")
-
-            stock_origen = float(row[0])
-            if stock_origen < cantidad:
-                raise ValueError(
-                    f"Stock insuficiente para lote #{id_lote}: disponible {stock_origen:.3f}, a trasladar {cantidad:.3f}."
-                )
-
-            # Insertar detalle de movimiento
-            q_insert_det = text(
+        # 3. Insertar todos los detalles en lote
+        conn.execute(
+            text(
                 """
                 INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
-                VALUES (:id_movimiento, :id_lote, :cantidad, :observaciones);
+                SELECT :id_movimiento, u.id_lote, u.cantidad, u.obs
+                FROM unnest(
+                    CAST(:lote_ids AS bigint[]),
+                    CAST(:cantidades AS numeric[]),
+                    CAST(:obs_list AS text[])
+                ) AS u(id_lote, cantidad, obs);
                 """
-            )
-            conn.execute(
-                q_insert_det,
-                {
-                    "id_movimiento": id_movimiento,
-                    "id_lote": id_lote,
-                    "cantidad": cantidad,
-                    "observaciones": obs_item,
-                },
-            )
+            ),
+            {
+                "id_movimiento": id_movimiento,
+                "lote_ids": lote_ids,
+                "cantidades": cantidades_list,
+                "obs_list": obs_list,
+            },
+        )
 
-            # Descontar en origen
-            q_update_orig = text(
+        # 4. Descontar en origen en lote
+        conn.execute(
+            text(
                 """
-                UPDATE stock_lote_local
-                SET cantidad = cantidad - :cantidad, actualizado_en = CURRENT_TIMESTAMP
-                WHERE id_lote = :id_lote AND id_local = :id_local_origen
+                UPDATE stock_lote_local AS s
+                SET cantidad = s.cantidad - u.cantidad,
+                    actualizado_en = CURRENT_TIMESTAMP
+                FROM unnest(
+                    CAST(:lote_ids AS bigint[]),
+                    CAST(:cantidades AS numeric[])
+                ) AS u(id_lote, cantidad)
+                WHERE s.id_lote = u.id_lote AND s.id_local = :id_local_origen;
                 """
-            )
-            conn.execute(
-                q_update_orig,
-                {"cantidad": cantidad, "id_lote": id_lote, "id_local_origen": id_local_origen},
-            )
+            ),
+            {
+                "id_local_origen": id_local_origen,
+                "lote_ids": lote_ids,
+                "cantidades": cantidades_list,
+            },
+        )
 
-            # Sumar/upsert en destino
-            q_upsert_dest = text(
+        # 5. Sumar/upsert en destino en lote
+        conn.execute(
+            text(
                 """
                 INSERT INTO stock_lote_local (id_lote, id_local, cantidad, actualizado_en)
-                VALUES (:id_lote, :id_local_destino, :cantidad, CURRENT_TIMESTAMP)
+                SELECT u.id_lote, :id_local_destino, u.cantidad, CURRENT_TIMESTAMP
+                FROM unnest(
+                    CAST(:lote_ids AS bigint[]),
+                    CAST(:cantidades AS numeric[])
+                ) AS u(id_lote, cantidad)
                 ON CONFLICT (id_lote, id_local) DO UPDATE
                 SET cantidad = stock_lote_local.cantidad + EXCLUDED.cantidad,
                     actualizado_en = CURRENT_TIMESTAMP;
                 """
-            )
-            conn.execute(
-                q_upsert_dest,
-                {"id_lote": id_lote, "id_local_destino": id_local_destino, "cantidad": cantidad},
-            )
-
-            total_kg += cantidad
-            detalles_procesados.append({
-                "id_lote": id_lote,
-                "cantidad": cantidad,
-            })
+            ),
+            {
+                "id_local_destino": id_local_destino,
+                "lote_ids": lote_ids,
+                "cantidades": cantidades_list,
+            },
+        )
 
         return {
             "id_movimiento": id_movimiento,
@@ -1582,12 +1641,26 @@ def registrar_traslado_consolidado(
         }
 
 
-def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) -> pd.DataFrame:
+def load_historial_movimientos(
+    id_local: Optional[int] = None,
+    limit: int = 50,
+    tipo_movimiento: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Carga el historial de movimientos de salida o traslados.
     Si se especifica id_local, filtra movimientos donde el local sea origen o destino.
+    Si se especifica tipo_movimiento, filtra directamente en SQL ('traslado' o 'salida_cocina').
     """
-    where_clause = "WHERE m.id_local_origen = :id_local OR m.id_local_destino = :id_local" if id_local else ""
+    condiciones = []
+    params: Dict[str, Any] = {"limit": int(limit)}
+    if id_local:
+        condiciones.append("(m.id_local_origen = :id_local OR m.id_local_destino = :id_local)")
+        params["id_local"] = int(id_local)
+    if tipo_movimiento:
+        condiciones.append("m.tipo_movimiento = :tipo_movimiento")
+        params["tipo_movimiento"] = tipo_movimiento
+
+    where_clause = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
     query = text(
         f"""
         SELECT
@@ -1625,7 +1698,6 @@ def load_historial_movimientos(id_local: Optional[int] = None, limit: int = 50) 
         """
     )
     with engine.connect() as conn:
-        params = {"id_local": id_local, "limit": limit} if id_local else {"limit": limit}
         return pd.read_sql(query, conn, params=params)
 
 
@@ -1901,6 +1973,398 @@ def load_cola_eventos_sync(id_local: Optional[int] = None, limit: int = 30) -> p
             return pd.read_sql(query, conn, params=params)
     except Exception:
         return pd.DataFrame()
+
+
+# ==============================================================================
+# CONSULTAS PARA MÓDULO DE REPORTES Y TRAZABILIDAD SEREMI (PDF)
+# ==============================================================================
+def _condicion_categoria_movimiento(categoria: str) -> str:
+    """Retorna la cláusula SQL de filtrado según la categoría operativa del movimiento."""
+    if categoria == "merma":
+        return "m.tipo_movimiento = 'salida_cocina' AND m.referencia LIKE 'MERMA:%'"
+    if categoria == "cocina":
+        return "m.tipo_movimiento = 'salida_cocina' AND (m.referencia IS NULL OR m.referencia NOT LIKE 'MERMA:%')"
+    if categoria == "traslado":
+        return "m.tipo_movimiento = 'traslado'"
+    raise ValueError(f"Categoría de movimiento no soportada: {categoria}")
+
+
+def _filtros_movimiento_sql(
+    categoria: str,
+    id_local: Optional[int] = None,
+    fecha_desde: Optional[date] = None,
+    fecha_hasta: Optional[date] = None,
+) -> tuple[str, Dict[str, Any]]:
+    """Construye cláusulas WHERE y parámetros seguros para listados y reportes de movimientos."""
+    condiciones = [_condicion_categoria_movimiento(categoria)]
+    params: Dict[str, Any] = {}
+
+    if id_local is not None:
+        if categoria == "traslado":
+            condiciones.append("(m.id_local_origen = :id_local OR m.id_local_destino = :id_local)")
+        else:
+            condiciones.append("m.id_local_origen = :id_local")
+        params["id_local"] = int(id_local)
+
+    if fecha_desde is not None:
+        condiciones.append("(m.fecha_movimiento AT TIME ZONE 'America/Santiago')::date >= :fecha_desde")
+        params["fecha_desde"] = fecha_desde
+
+    if fecha_hasta is not None:
+        condiciones.append("(m.fecha_movimiento AT TIME ZONE 'America/Santiago')::date <= :fecha_hasta")
+        params["fecha_hasta"] = fecha_hasta
+
+    return " AND ".join(condiciones), params
+
+
+def load_listado_documentos_movimiento(
+    categoria: str,
+    id_local: Optional[int] = None,
+    fecha_desde: Optional[date] = None,
+    fecha_hasta: Optional[date] = None,
+    limit: int = 200,
+) -> pd.DataFrame:
+    """
+    Lista documentos agrupados por id_movimiento (1 fila por Acta/Guía/Orden)
+    para 'merma', 'traslado' o 'cocina', incluyendo manipulador y receptor.
+    """
+    where_sql, params = _filtros_movimiento_sql(categoria, id_local, fecha_desde, fecha_hasta)
+    params["limit"] = int(limit)
+
+    query = text(
+        f"""
+        SELECT
+            m.id_movimiento,
+            m.fecha_movimiento,
+            loc_o.nombre AS local_origen,
+            COALESCE(loc_d.nombre, '-') AS local_destino,
+            COALESCE(m.referencia, '-') AS referencia,
+            COALESCE(u_o.nombre, 'Operador Central') AS responsable,
+            COALESCE(u_o.rol, 'operador') AS rol_responsable,
+            COALESCE(u_d.nombre, '-') AS receptor,
+            COALESCE(u_d.rol, '-') AS rol_receptor,
+            COUNT(dm.id_detalle_movimiento) AS total_lotes,
+            ROUND(COALESCE(SUM(dm.cantidad), 0), 3) AS total_cantidad,
+            ROUND(COALESCE(SUM(dm.cantidad * COALESCE(dc.costo_unitario, 0)), 0), 0) AS costo_total,
+            STRING_AGG(DISTINCT p.nombre, ', ' ORDER BY p.nombre) AS productos_resumen,
+            COALESCE(m.observaciones, '') AS observaciones,
+            m.estado
+        FROM movimientos AS m
+        JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
+        LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
+        LEFT JOIN usuarios AS u_o ON u_o.id_usuario = m.id_usuario
+        LEFT JOIN usuarios AS u_d ON u_d.id_usuario = m.id_usuario_recepcion
+        LEFT JOIN detalle_movimiento AS dm ON dm.id_movimiento = m.id_movimiento
+        LEFT JOIN lotes AS l ON l.id_lote = dm.id_lote
+        LEFT JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+        LEFT JOIN productos AS p ON p.id_producto = dc.id_producto
+        WHERE {where_sql}
+        GROUP BY
+            m.id_movimiento, m.fecha_movimiento, loc_o.nombre, loc_d.nombre,
+            m.referencia, u_o.nombre, u_o.rol, u_d.nombre, u_d.rol, m.observaciones, m.estado
+        ORDER BY m.fecha_movimiento DESC, m.id_movimiento DESC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
+def get_movimiento_para_pdf(id_movimiento: int) -> Dict[str, Any]:
+    """
+    Obtiene cabecera completa y detalle completo de lotes/proveedores/manipuladores
+    para imprimir el PDF oficial de un movimiento (Acta de Merma, Guía de Traslado o Acta de Cocina).
+    """
+    q_header = text(
+        """
+        SELECT
+            m.id_movimiento,
+            m.tipo_movimiento,
+            m.fecha_movimiento,
+            COALESCE(m.referencia, '-') AS referencia,
+            COALESCE(m.observaciones, '') AS observaciones,
+            m.estado,
+            loc_o.nombre AS local_origen,
+            COALESCE(loc_o.direccion, '') AS direccion_origen,
+            COALESCE(loc_d.nombre, '-') AS local_destino,
+            COALESCE(loc_d.direccion, '') AS direccion_destino,
+            COALESCE(u_o.nombre, 'Operador Central') AS responsable_origen,
+            COALESCE(u_o.nombre_usuario, '-') AS username_origen,
+            COALESCE(u_o.rol, 'operador') AS rol_origen,
+            COALESCE(u_d.nombre, '-') AS responsable_destino,
+            COALESCE(u_d.rol, '-') AS rol_destino
+        FROM movimientos AS m
+        JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
+        LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
+        LEFT JOIN usuarios AS u_o ON u_o.id_usuario = m.id_usuario
+        LEFT JOIN usuarios AS u_d ON u_d.id_usuario = m.id_usuario_recepcion
+        WHERE m.id_movimiento = :id_movimiento
+        """
+    )
+    q_items = text(
+        """
+        SELECT
+            l.id_lote,
+            p.nombre AS producto,
+            p.unidad_medida,
+            l.codigo_lote_proveedor,
+            l.fecha_vencimiento,
+            l.fecha_recepcion,
+            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
+            dm.cantidad,
+            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+            ROUND(dm.cantidad * COALESCE(dc.costo_unitario, 0), 2) AS costo_subtotal,
+            prov.nombre AS proveedor,
+            COALESCE(prov.rut, '-') AS rut_proveedor,
+            c.tipo_documento,
+            c.numero_documento,
+            COALESCE(dm.observaciones, '') AS obs_detalle
+        FROM detalle_movimiento AS dm
+        JOIN lotes AS l ON l.id_lote = dm.id_lote
+        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+        JOIN compras AS c ON c.id_compra = dc.id_compra
+        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+        JOIN productos AS p ON p.id_producto = dc.id_producto
+        WHERE dm.id_movimiento = :id_movimiento
+        ORDER BY p.nombre ASC, l.fecha_vencimiento ASC
+        """
+    )
+    with engine.connect() as conn:
+        h_df = pd.read_sql(q_header, conn, params={"id_movimiento": int(id_movimiento)})
+        if h_df.empty:
+            return {}
+        items_df = pd.read_sql(q_items, conn, params={"id_movimiento": int(id_movimiento)})
+        return {"cabecera": h_df.iloc[0].to_dict(), "items": items_df}
+
+
+def load_listado_recepciones(
+    id_local: Optional[int] = None,
+    fecha_desde: Optional[date] = None,
+    fecha_hasta: Optional[date] = None,
+    limit: int = 200,
+) -> pd.DataFrame:
+    """
+    Lista las recepciones de compra agrupadas por id_compra (1 fila por documento fiscal)
+    con resumen de lotes, temperatura máxima HACCP y usuario receptor.
+    """
+    condiciones = ["1 = 1"]
+    params: Dict[str, Any] = {"limit": int(limit)}
+
+    if id_local is not None:
+        condiciones.append("c.id_local_receptor = :id_local")
+        params["id_local"] = int(id_local)
+    if fecha_desde is not None:
+        condiciones.append("c.fecha_recepcion >= :fecha_desde")
+        params["fecha_desde"] = fecha_desde
+    if fecha_hasta is not None:
+        condiciones.append("c.fecha_recepcion <= :fecha_hasta")
+        params["fecha_hasta"] = fecha_hasta
+
+    where_sql = " AND ".join(condiciones)
+    query = text(
+        f"""
+        SELECT
+            c.id_compra,
+            c.fecha_recepcion,
+            c.fecha_compra,
+            UPPER(c.tipo_documento) AS tipo_documento,
+            c.numero_documento,
+            prov.nombre AS proveedor,
+            COALESCE(prov.rut, '-') AS rut_proveedor,
+            loc.nombre AS local_receptor,
+            COALESCE(u.nombre, 'Operador Central') AS recibido_por,
+            COALESCE(u.rol, 'operador') AS rol_receptor,
+            COUNT(l.id_lote) AS total_lotes,
+            ROUND(COALESCE(SUM(l.cantidad_inicial), 0), 3) AS total_cantidad,
+            ROUND(COALESCE(SUM(l.cantidad_inicial * COALESCE(dc.costo_unitario, 0)), 0), 0) AS monto_total,
+            ROUND(COALESCE(MAX(l.temperatura_recepcion), 2.0), 1) AS temp_max,
+            STRING_AGG(DISTINCT p.nombre, ', ' ORDER BY p.nombre) AS productos_resumen,
+            COALESCE(c.observaciones, '') AS observaciones
+        FROM compras AS c
+        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+        JOIN locales AS loc ON loc.id_local = c.id_local_receptor
+        LEFT JOIN usuarios AS u ON u.id_usuario = c.id_usuario_receptor
+        LEFT JOIN detalle_compra AS dc ON dc.id_compra = c.id_compra
+        LEFT JOIN productos AS p ON p.id_producto = dc.id_producto
+        LEFT JOIN lotes AS l ON l.id_detalle_compra = dc.id_detalle_compra
+        WHERE {where_sql}
+        GROUP BY
+            c.id_compra, c.fecha_recepcion, c.fecha_compra, c.tipo_documento,
+            c.numero_documento, prov.nombre, prov.rut, loc.nombre,
+            u.nombre, u.rol, c.observaciones
+        ORDER BY c.fecha_recepcion DESC, c.id_compra DESC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
+def get_recepcion_para_pdf(id_compra: int) -> Dict[str, Any]:
+    """
+    Obtiene cabecera completa de la compra y sus lotes ingresados para imprimir
+    el Comprobante / Acta de Recepción y Control Sanitario HACCP.
+    """
+    q_header = text(
+        """
+        SELECT
+            c.id_compra,
+            UPPER(c.tipo_documento) AS tipo_documento,
+            c.numero_documento,
+            c.fecha_compra,
+            c.fecha_recepcion,
+            COALESCE(c.observaciones, '') AS observaciones,
+            c.creado_en,
+            prov.nombre AS proveedor,
+            COALESCE(prov.rut, '-') AS rut_proveedor,
+            COALESCE(prov.telefono, '-') AS telefono_proveedor,
+            COALESCE(prov.correo, '-') AS correo_proveedor,
+            COALESCE(prov.direccion, '-') AS direccion_proveedor,
+            loc.nombre AS local_receptor,
+            COALESCE(loc.direccion, '') AS direccion_local,
+            COALESCE(u.nombre, 'Operador Central') AS recibido_por,
+            COALESCE(u.rol, 'operador') AS rol_receptor
+        FROM compras AS c
+        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+        JOIN locales AS loc ON loc.id_local = c.id_local_receptor
+        LEFT JOIN usuarios AS u ON u.id_usuario = c.id_usuario_receptor
+        WHERE c.id_compra = :id_compra
+        """
+    )
+    q_items = text(
+        """
+        SELECT
+            l.id_lote,
+            p.nombre AS producto,
+            p.unidad_medida,
+            l.codigo_lote_proveedor,
+            l.cantidad_inicial,
+            l.fecha_vencimiento,
+            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
+            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+            ROUND(l.cantidad_inicial * COALESCE(dc.costo_unitario, 0), 2) AS subtotal,
+            COALESCE(dc.observaciones, '') AS obs_detalle
+        FROM lotes AS l
+        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+        JOIN productos AS p ON p.id_producto = dc.id_producto
+        WHERE dc.id_compra = :id_compra
+        ORDER BY p.nombre ASC, l.id_lote ASC
+        """
+    )
+    with engine.connect() as conn:
+        h_df = pd.read_sql(q_header, conn, params={"id_compra": int(id_compra)})
+        if h_df.empty:
+            return {}
+        items_df = pd.read_sql(q_items, conn, params={"id_compra": int(id_compra)})
+        return {"cabecera": h_df.iloc[0].to_dict(), "items": items_df}
+
+
+def load_reporte_consolidado_movimientos(
+    categoria: str,
+    id_local: Optional[int] = None,
+    fecha_desde: Optional[date] = None,
+    fecha_hasta: Optional[date] = None,
+) -> pd.DataFrame:
+    """
+    Carga el libro consolidado detallado de movimientos (mermas, traslados u operaciones de cocina)
+    con trazabilidad completa de lote, proveedor y manipulador para inspección SEREMI.
+    """
+    where_sql, params = _filtros_movimiento_sql(categoria, id_local, fecha_desde, fecha_hasta)
+    query = text(
+        f"""
+        SELECT
+            m.id_movimiento,
+            m.fecha_movimiento,
+            loc_o.nombre AS local_origen,
+            COALESCE(loc_d.nombre, '-') AS local_destino,
+            COALESCE(m.referencia, '-') AS referencia,
+            COALESCE(u_o.nombre, 'Operador Central') AS manipulador,
+            COALESCE(u_o.rol, 'operador') AS rol_manipulador,
+            COALESCE(u_d.nombre, '-') AS receptor,
+            p.nombre AS producto,
+            p.unidad_medida,
+            l.id_lote,
+            l.codigo_lote_proveedor,
+            l.fecha_vencimiento,
+            prov.nombre AS proveedor,
+            dm.cantidad,
+            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+            ROUND(dm.cantidad * COALESCE(dc.costo_unitario, 0), 0) AS costo_total,
+            COALESCE(m.observaciones, '') AS observaciones
+        FROM detalle_movimiento AS dm
+        JOIN movimientos AS m ON m.id_movimiento = dm.id_movimiento
+        JOIN lotes AS l ON l.id_lote = dm.id_lote
+        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+        JOIN compras AS c ON c.id_compra = dc.id_compra
+        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+        JOIN productos AS p ON p.id_producto = dc.id_producto
+        JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
+        LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
+        LEFT JOIN usuarios AS u_o ON u_o.id_usuario = m.id_usuario
+        LEFT JOIN usuarios AS u_d ON u_d.id_usuario = m.id_usuario_recepcion
+        WHERE {where_sql}
+        ORDER BY m.fecha_movimiento DESC, m.id_movimiento DESC, p.nombre ASC
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
+def load_reporte_consolidado_recepciones(
+    id_local: Optional[int] = None,
+    fecha_desde: Optional[date] = None,
+    fecha_hasta: Optional[date] = None,
+) -> pd.DataFrame:
+    """
+    Carga el registro consolidado de recepciones de materias primas y control de temperatura HACCP
+    para auditoría SEREMI por rango de fechas y sucursal.
+    """
+    condiciones = ["1 = 1"]
+    params: Dict[str, Any] = {}
+    if id_local is not None:
+        condiciones.append("c.id_local_receptor = :id_local")
+        params["id_local"] = int(id_local)
+    if fecha_desde is not None:
+        condiciones.append("c.fecha_recepcion >= :fecha_desde")
+        params["fecha_desde"] = fecha_desde
+    if fecha_hasta is not None:
+        condiciones.append("c.fecha_recepcion <= :fecha_hasta")
+        params["fecha_hasta"] = fecha_hasta
+
+    where_sql = " AND ".join(condiciones)
+    query = text(
+        f"""
+        SELECT
+            c.id_compra,
+            c.fecha_recepcion,
+            UPPER(c.tipo_documento) AS tipo_documento,
+            c.numero_documento,
+            prov.nombre AS proveedor,
+            COALESCE(prov.rut, '-') AS rut_proveedor,
+            loc.nombre AS local_receptor,
+            COALESCE(u.nombre, 'Operador Central') AS recibido_por,
+            l.id_lote,
+            p.nombre AS producto,
+            p.unidad_medida,
+            l.codigo_lote_proveedor,
+            l.fecha_vencimiento,
+            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
+            l.cantidad_inicial,
+            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+            ROUND(l.cantidad_inicial * COALESCE(dc.costo_unitario, 0), 0) AS subtotal
+        FROM compras AS c
+        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+        JOIN locales AS loc ON loc.id_local = c.id_local_receptor
+        LEFT JOIN usuarios AS u ON u.id_usuario = c.id_usuario_receptor
+        JOIN detalle_compra AS dc ON dc.id_compra = c.id_compra
+        JOIN productos AS p ON p.id_producto = dc.id_producto
+        JOIN lotes AS l ON l.id_detalle_compra = dc.id_detalle_compra
+        WHERE {where_sql}
+        ORDER BY c.fecha_recepcion DESC, c.id_compra DESC, p.nombre ASC
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
 
 
 def test_connection():
