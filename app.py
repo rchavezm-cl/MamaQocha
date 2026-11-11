@@ -3258,6 +3258,29 @@ with tab_mermas:
         "según diagnóstico INACAP, pág. 17) y garantizar la inocuidad alimentaria."
     )
 
+    if "voucher_merma_consolidado" in st.session_state:
+        v_mc = st.session_state.pop("voucher_merma_consolidado")
+        st.success(f"✅ Acta de Baja Consolidada #{v_mc['id_movimiento']} procesada y descontada de inventario ({v_mc['total_partidas']} lote(s)).")
+        items_html = "".join(
+            f"<li><strong>{p['producto']}</strong> (Lote #{p['id_lote']} — <code>{p['codigo_lote_proveedor']}</code>): "
+            f"<code>{p['cantidad']:.3f} {p['unidad_medida']}</code> descartados "
+            f"(Pérdida: <strong>${p['costo_total_perdida']:,.0f} CLP</strong> | Saldo restante: <code>{p['nuevo_stock']:.3f} {p['unidad_medida']}</code>)</li>"
+            for p in v_mc.get("partidas", [])
+        )
+        st.markdown(
+            f"""
+            <div class="voucher-card" style="border-left: 5px solid #e63946; background: #fff5f5;">
+                <h4 style="margin:0 0 8px 0; color:#b91c1c;">🗑️ Acta de Baja Consolidada por Merma #{v_mc['id_movimiento']}</h4>
+                • <strong>Motivo / Causa Raíz:</strong> <code>{v_mc['motivo']}</code><br>
+                • <strong>Total Partidas / Kilos:</strong> <code>{v_mc['total_partidas']} lote(s)</code> — <code>{v_mc['total_kilos']:.3f} kg</code><br>
+                • <strong>Pérdida Financiera Cuantificada:</strong> <strong style="color:#b91c1c;">${v_mc['costo_total_perdida']:,.0f} CLP</strong><br>
+                • <strong>Autorizado por:</strong> {v_mc.get('responsable', 'Operador Central')}
+                <ul style="margin:8px 0 0 18px; padding:0; font-size:0.9rem;">{items_html}</ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     if "voucher_merma" in st.session_state:
         v_m = st.session_state.pop("voucher_merma")
         st.success("✅ Baja por merma procesada y descontada de inventario.")
@@ -3326,33 +3349,226 @@ with tab_mermas:
             key="sel_local_merma",
         )
 
-    stock_disp_merma = db.load_stock_disponible_local(int(local_merma_id))
+    if st.session_state.get("carro_merma_local_id") != int(local_merma_id):
+        st.session_state["carro_merma_items"] = []
+        st.session_state["carro_merma_local_id"] = int(local_merma_id)
+    if "carro_merma_items" not in st.session_state:
+        st.session_state["carro_merma_items"] = []
 
-    if stock_disp_merma.empty:
+    def _agregar_lote_carro_merma(fila_lote) -> bool:
+        lid = int(fila_lote["id_lote"])
+        if any(it["id_lote"] == lid for it in st.session_state["carro_merma_items"]):
+            return False
+        st.session_state["carro_merma_items"].append({
+            "id_lote": lid,
+            "producto": str(fila_lote["producto"]),
+            "codigo_lote_proveedor": str(fila_lote["codigo_lote_proveedor"]),
+            "dias_para_vencer": int(fila_lote["dias_para_vencer"]),
+            "stock_disponible": float(fila_lote["stock_disponible"]),
+            "cantidad": float(fila_lote["stock_disponible"]),
+            "costo_unitario": float(fila_lote["costo_unitario"]),
+            "subtotal_valor": float(fila_lote["valor_en_riesgo"]),
+            "unidad_medida": str(fila_lote["unidad_medida"]),
+        })
+        return True
+
+    df_lotes_merma = db.load_top_riesgo_traslado(int(local_merma_id), limit=200)
+
+    if df_lotes_merma.empty:
         st.warning("No hay lotes con existencias activas en este local para declarar mermas.")
     else:
-        dict_lotes_merma = {
-            int(row["id_lote"]): row["display_label"]
-            for _, row in stock_disp_merma.iterrows()
-        }
-
+        # ----------------------------------------------------------------------
+        # PANEL 1: GRILLA DE SELECCIÓN RÁPIDA DE LOTES (ESTILO TRASLADOS)
+        # ----------------------------------------------------------------------
         with st.container(border=True):
-            st.markdown("##### 📝 Declaración y Acta de Merma")
-            with st.form("form_declarar_merma", clear_on_submit=False):
-                lote_merma_sel = st.selectbox(
-                    "Selecciona el lote afectado:*",
-                    options=list(dict_lotes_merma.keys()),
-                    format_func=lambda k: dict_lotes_merma[k],
-                    key="sel_lote_merma_form",
+            df_vencidos_merma = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0]
+            val_vencido_local = float(df_vencidos_merma["valor_en_riesgo"].sum()) if not df_vencidos_merma.empty else 0.0
+            val_total_local = float(df_lotes_merma["valor_en_riesgo"].sum())
+
+            col_mh1, col_mh2 = st.columns([2.2, 1.3])
+            with col_mh1:
+                st.markdown(
+                    f"""
+                    <div style="margin-bottom:6px;">
+                        <strong style="color:#b91c1c; font-size:1.05rem;">🔴 Grilla de Selección Rápida de Lotes para Baja (FEFO)</strong><br>
+                        <span style="font-size:0.82rem; color:#64748b;">
+                            Marca una o varias filas directamente en la grilla y presiona <b>➕ Cargar Seleccionados</b>, o usa la carga rápida de vencidos/críticos.
+                        </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with col_mh2:
+                filtro_merma = st.radio(
+                    "Filtro rápido:",
+                    ["Todos", "Vencidos (<0d)", "Críticos (≤2d)"],
+                    horizontal=True,
+                    key="rad_filtro_lotes_merma",
+                    label_visibility="collapsed",
                 )
 
-                fila_merma_sel = stock_disp_merma[stock_disp_merma["id_lote"] == lote_merma_sel].iloc[0]
-                max_merma = float(fila_merma_sel["stock_disponible"])
-                unidad_merma = fila_merma_sel["unidad_medida"]
-                costo_unid_merma = float(fila_merma_sel.get("costo_unitario", 0.0))
+            if filtro_merma == "Vencidos (<0d)":
+                df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0].reset_index(drop=True)
+            elif filtro_merma == "Críticos (≤2d)":
+                df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] <= 2].reset_index(drop=True)
+            else:
+                df_merma_vista = df_lotes_merma.reset_index(drop=True)
 
+            if df_merma_vista.empty:
+                st.info("No hay lotes que coincidan con el filtro seleccionado.")
+            else:
+                sel_merma_event = st.dataframe(
+                    df_merma_vista[[
+                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
+                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor", "fecha_vencimiento"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=260,
+                    on_select="rerun",
+                    selection_mode="multi-row",
+                    key=f"tbl_sel_merma_{local_merma_id}_{filtro_merma}",
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
+                        "producto": "Materia Prima",
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
+                        "estado_alerta": "Semáforo",
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.3f kg"),
+                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Stock", format="$%d"),
+                        "codigo_lote_proveedor": "Ref.",
+                        "fecha_vencimiento": st.column_config.DateColumn("Caducidad", format="YYYY-MM-DD"),
+                    },
+                )
+                filas_marcadas = sel_merma_event.selection.rows if sel_merma_event and sel_merma_event.selection else []
+
+                lotes_merma_dict = {
+                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.3f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
+                    for _, r in df_merma_vista.iterrows()
+                }
+
+                col_bm0, col_bm1, col_bm2, col_bm3, col_bm4 = st.columns([1.5, 2.3, 0.9, 1.3, 1.0])
+                with col_bm0:
+                    if st.button(
+                        f"➕ Cargar Marcas ({len(filas_marcadas)})",
+                        key="btn_add_sel_merma",
+                        disabled=(len(filas_marcadas) == 0),
+                        type="primary" if filas_marcadas else "secondary",
+                        use_container_width=True,
+                        help="Agrega al acta todos los lotes marcados con checkbox en la tabla superior.",
+                    ):
+                        agregados = sum(
+                            1 for idx in filas_marcadas if _agregar_lote_carro_merma(df_merma_vista.iloc[idx])
+                        )
+                        if agregados > 0:
+                            st.toast(f"🗑️ {agregados} lote(s) agregado(s) al Acta de Baja.", icon="📋")
+                            st.rerun()
+                        else:
+                            st.info("Los lotes marcados ya estaban cargados en el acta.")
+                with col_bm1:
+                    lote_pin_merma = st.selectbox(
+                        "Seleccionar lote puntual:*",
+                        options=list(lotes_merma_dict.keys()),
+                        format_func=lambda k: lotes_merma_dict[k],
+                        key="sel_pin_merma",
+                        label_visibility="collapsed",
+                    )
+                with col_bm2:
+                    if st.button("➕ Cargar", key="btn_add_one_merma", use_container_width=True, help="Agrega este lote al Acta de Baja."):
+                        row_m = df_merma_vista[df_merma_vista["id_lote"] == lote_pin_merma].iloc[0]
+                        if _agregar_lote_carro_merma(row_m):
+                            st.toast(f"🗑️ #{lote_pin_merma} {row_m['producto']} cargado al Acta de Baja.", icon="📋")
+                            st.rerun()
+                        else:
+                            st.info("Este lote ya está cargado en el Acta de Baja.")
+                with col_bm3:
+                    n_venc = len(df_vencidos_merma)
+                    if st.button(
+                        f"⚡ Vencidos ({n_venc})",
+                        key="btn_add_vencidos_merma",
+                        disabled=(n_venc == 0),
+                        use_container_width=True,
+                        help=f"Carga automáticamente los {n_venc} lotes vencidos (${val_vencido_local:,.0f} CLP).",
+                    ):
+                        agregados_v = sum(
+                            1 for _, r_v in df_vencidos_merma.iterrows() if _agregar_lote_carro_merma(r_v)
+                        )
+                        if agregados_v > 0:
+                            st.toast(f"⚡ {agregados_v} lote(s) vencido(s) cargado(s) al acta.", icon="🔴")
+                            st.rerun()
+                        else:
+                            st.info("Todos los lotes vencidos ya están en el acta.")
+                with col_bm4:
+                    if st.button("⚡ Top 7", key="btn_add_top7_merma", use_container_width=True, help="Carga los 7 lotes más próximos a vencer/vencidos."):
+                        agregados_7 = sum(
+                            1 for _, r_7 in df_lotes_merma.head(7).iterrows() if _agregar_lote_carro_merma(r_7)
+                        )
+                        if agregados_7 > 0:
+                            st.toast(f"⚡ {agregados_7} lotes críticos cargados al acta.", icon="🚀")
+                            st.rerun()
+
+                st.caption(
+                    f"Stock activo en sucursal: **{len(df_lotes_merma)} lotes** (${val_total_local:,.0f} CLP) | "
+                    f"Vencidos: **{len(df_vencidos_merma)} lotes** (${val_vencido_local:,.0f} CLP)"
+                )
+
+        # ----------------------------------------------------------------------
+        # PANEL 2: VISTA PREVIA Y ACTA DE BAJA CONSOLIDADA
+        # ----------------------------------------------------------------------
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div style="background:#fee2e2; border-left:4px solid #e63946; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
+                    <strong style="color:#991b1b; font-size:1rem;">📝 Vista Previa: Acta de Baja Consolidada por Merma</strong><br>
+                    <span style="font-size:0.8rem; color:#7f1d1d;">Ajusta las cantidades exactas a descartar (parcial o total) o elimina filas antes de confirmar.</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            items_merma = st.session_state["carro_merma_items"]
+            if not items_merma:
+                st.info("Aún no hay lotes cargados en el acta. Selecciona filas arriba o usa **➕ Cargar** / **⚡ Vencidos**.")
+            else:
+                df_editor_merma = pd.DataFrame(items_merma)
+                edited_merma = st.data_editor(
+                    df_editor_merma[[
+                        "id_lote", "producto", "dias_para_vencer",
+                        "stock_disponible", "cantidad", "subtotal_valor"
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    key="editor_acta_merma",
+                    column_config={
+                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
+                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
+                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
+                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.3f kg"),
+                        "cantidad": st.column_config.NumberColumn("A Descartar (kg)", min_value=0.001, format="%.3f", required=True),
+                        "subtotal_valor": st.column_config.NumberColumn("Pérdida Est.", disabled=True, format="$%d"),
+                    },
+                )
+
+                nuevos_items_merma = []
+                for _, r_ed in edited_merma.iterrows():
+                    match_orig = next((x for x in items_merma if x["id_lote"] == r_ed["id_lote"]), None)
+                    if match_orig:
+                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
+                        match_orig["cantidad"] = cant_real
+                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
+                        nuevos_items_merma.append(match_orig)
+                st.session_state["carro_merma_items"] = nuevos_items_merma
+
+                tot_kg_merma = sum(it["cantidad"] for it in nuevos_items_merma)
+                tot_val_merma = sum(it["subtotal_valor"] for it in nuevos_items_merma)
+
+                col_tm1, col_tm2, col_tm3 = st.columns(3)
+                col_tm1.metric("Lotes en Acta", f"{len(nuevos_items_merma)} lote(s)")
+                col_tm2.metric("Total Volumen a Descartar", f"{tot_kg_merma:.3f} kg")
+                col_tm3.metric("Pérdida Financiera Estimada", f"${tot_val_merma:,.0f} CLP")
+
+                st.markdown("---")
                 col_m_f1, col_m_f2 = st.columns(2)
-
                 with col_m_f1:
                     iconos_causa = {
                         "Ruptura de cadena de frío en cocina": "❄️ Ruptura de cadena de frío en cocina",
@@ -3364,19 +3580,9 @@ with tab_mermas:
                         "Tipificación Obligatoria de Causa Raíz:*",
                         options=list(db.CAUSAS_RAIZ_MERMA),
                         format_func=lambda k: iconos_causa.get(k, k),
-                        help="Protocolo estandarizado de clasificación de pérdidas para auditoría e informes (Etapa 2 [19, 24])."
+                        key="sel_motivo_merma_cons",
+                        help="Protocolo estandarizado de clasificación de pérdidas para auditoría e informes (Etapa 2 [19, 24]).",
                     )
-
-                    cant_merma = st.number_input(
-                        f"Cantidad a dar de baja ({unidad_merma}):*",
-                        min_value=0.001,
-                        max_value=max_merma,
-                        value=min(1.0, max_merma),
-                        step=0.5,
-                        format="%.3f",
-                        help=f"Máximo disponible para dar de baja: {max_merma:.3f} {unidad_merma}",
-                    )
-
                     opc_usr_merma, idx_usr_merma = get_opciones_usuarios(int(local_merma_id), id_usuario_sesion)
                     id_usr_merma = st.selectbox(
                         "Autorizado / Declarado por:*",
@@ -3385,59 +3591,51 @@ with tab_mermas:
                         format_func=lambda k: opc_usr_merma[k] if k is not None else "Operador Central",
                         key="sel_usuario_merma",
                     )
-
                 with col_m_f2:
-                    costo_perdida_estimada = cant_merma * costo_unid_merma
-                    st.markdown(
-                        f"""
-                        <div style="background:#fff5f5; border:1px solid #fecaca; border-radius:8px; padding:12px;">
-                            <strong>Impacto Financiero de la Merma:</strong><br>
-                            • <strong>Insumo:</strong> {fila_merma_sel['producto']}<br>
-                            • <strong>Costo Unitario de Compra:</strong> ${costo_unid_merma:,.2f} / {unidad_merma}<br>
-                            • <strong>Pérdida en Costos Estimada:</strong> <strong style="color:#b91c1c; font-size:1.1rem;">${costo_perdida_estimada:,.0f} CLP</strong><br>
-                            • <strong>Stock disponible en local:</strong> <code>{max_merma:.3f} {unidad_merma}</code>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
                     obs_merma = st.text_area(
                         "Justificación sanitaria / Causa Raíz detallada:*",
-                        placeholder="Ej. Registro de temperatura superó los 7°C por corte eléctrico de 3 horas...",
-                        height=60,
-                        help="Obligatorio para mantener el expediente forense de control de pérdidas."
+                        placeholder="Ej. Retiro preventivo por vencimiento FEFO / ruptura de frío...",
+                        height=108,
+                        key="txt_obs_merma_cons",
+                        help="Obligatorio para mantener el expediente forense de control de pérdidas.",
                     )
 
-                st.markdown("---")
-                btn_declarar_merma = st.form_submit_button("🗑️ Confirmar y Procesar Baja por Merma", type="primary", use_container_width=True)
-
-            if btn_declarar_merma:
-                if not obs_merma.strip():
-                    st.warning("⚠️ Debe ingresar una justificación o detalle de causa raíz antes de confirmar el acta.")
-                else:
-                    try:
-                        res_m = db.registrar_merma(
-                            id_local=int(local_merma_id),
-                            id_lote=int(lote_merma_sel),
-                            cantidad=float(cant_merma),
-                            motivo=motivo_sel,
-                            observaciones=obs_merma.strip(),
-                            id_usuario=int(id_usr_merma) if id_usr_merma is not None else None,
-                        )
-                        st.session_state["voucher_merma"] = {
-                            "id_movimiento": res_m["id_movimiento"],
-                            "producto": res_m["producto"],
-                            "lote": res_m["codigo_lote_proveedor"],
-                            "motivo": res_m["motivo"],
-                            "cantidad": res_m["cantidad"],
-                            "unidad": res_m["unidad_medida"],
-                            "costo_unitario": res_m["costo_unitario"],
-                            "costo_total_perdida": res_m["costo_total_perdida"],
-                            "nuevo_stock": res_m["nuevo_stock"],
-                            "responsable": opc_usr_merma.get(id_usr_merma, "Operador Central") if id_usr_merma else "Operador Central",
-                        }
+                col_btn_m1, col_btn_m2 = st.columns([2.4, 1])
+                with col_btn_m1:
+                    btn_declarar_merma = st.button(
+                        f"🗑️ Confirmar y Procesar Baja Consolidada ({len(nuevos_items_merma)} lote(s) | {tot_kg_merma:.2f} kg)",
+                        type="primary",
+                        disabled=(len(nuevos_items_merma) == 0),
+                        use_container_width=True,
+                        key="btn_confirmar_merma_cons",
+                    )
+                with col_btn_m2:
+                    if st.button("🗑️ Vaciar Lista", use_container_width=True, key="btn_vaciar_merma_cons"):
+                        st.session_state["carro_merma_items"] = []
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Error al procesar la merma: {e}")
+
+                if btn_declarar_merma:
+                    if not obs_merma.strip():
+                        st.warning("⚠️ Debe ingresar una justificación o detalle de causa raíz antes de confirmar el acta.")
+                    else:
+                        try:
+                            res_mc = db.registrar_merma_consolidada(
+                                id_local=int(local_merma_id),
+                                partidas=nuevos_items_merma,
+                                motivo=motivo_sel,
+                                observaciones=obs_merma.strip(),
+                                id_usuario=int(id_usr_merma) if id_usr_merma is not None else None,
+                            )
+                            res_mc["responsable"] = (
+                                opc_usr_merma.get(id_usr_merma, "Operador Central")
+                                if id_usr_merma
+                                else "Operador Central"
+                            )
+                            st.session_state["carro_merma_items"] = []
+                            st.session_state["voucher_merma_consolidado"] = res_mc
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al procesar la baja consolidada por merma: {e}")
 
     # ==============================================================================
     # REPORTE ESTADÍSTICO DE CAUSAS RAÍZ (ETAPA 2 INACAP [19, 24])

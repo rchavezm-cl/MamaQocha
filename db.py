@@ -929,6 +929,20 @@ CAUSAS_RAIZ_MERMA = (
 )
 
 
+def _normalizar_causa_merma(motivo: str) -> str:
+    """Valida y normaliza la causa raíz de merma contra el catálogo oficial."""
+    motivo_limpio = motivo.strip()
+    if motivo_limpio in CAUSAS_RAIZ_MERMA:
+        return motivo_limpio
+    coincidencias = [c for c in CAUSAS_RAIZ_MERMA if c.lower() in motivo_limpio.lower()]
+    if coincidencias:
+        return coincidencias[0]
+    raise ValueError(
+        f"Causa raíz inválida: '{motivo}'. "
+        f"Debe clasificar obligatoriamente en una de las causas oficiales: {', '.join(CAUSAS_RAIZ_MERMA)}."
+    )
+
+
 def registrar_merma(
     id_local: int,
     id_lote: int,
@@ -944,18 +958,7 @@ def registrar_merma(
     if cantidad <= 0:
         raise ValueError("La cantidad de merma debe ser mayor a 0.")
 
-    # Validación estricta de causa raíz
-    motivo_limpio = motivo.strip()
-    if motivo_limpio not in CAUSAS_RAIZ_MERMA:
-        # Permitir coincidencia tolerante en caso de prefijos o espacios
-        coincidencias = [c for c in CAUSAS_RAIZ_MERMA if c.lower() in motivo_limpio.lower()]
-        if coincidencias:
-            motivo_limpio = coincidencias[0]
-        else:
-            raise ValueError(
-                f"Causa raíz inválida: '{motivo}'. "
-                f"Debe clasificar obligatoriamente en una de las causas oficiales: {', '.join(CAUSAS_RAIZ_MERMA)}."
-            )
+    motivo_limpio = _normalizar_causa_merma(motivo)
 
     with engine.begin() as conn:
         # 1. Validar y bloquear stock actual obteniendo el costo unitario
@@ -1057,6 +1060,148 @@ def registrar_merma(
             "costo_unitario": costo_unitario,
             "costo_total_perdida": costo_total_perdida,
             "nuevo_stock": nuevo_stock,
+        }
+
+
+def registrar_merma_consolidada(
+    id_local: int,
+    partidas: list,
+    motivo: str,
+    observaciones: Optional[str] = None,
+    id_usuario: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Registra una baja consolidada multi-lote por merma en una sola transacción atómica.
+    Crea 1 cabecera en movimientos (referencia 'MERMA: <causa>') y N detalles en detalle_movimiento,
+    descontando stock_lote_local y calculando la pérdida financiera total.
+    """
+    if not partidas:
+        raise ValueError("Debe incluir al menos un lote para procesar el acta de baja por merma.")
+
+    motivo_limpio = _normalizar_causa_merma(motivo)
+
+    # Agrupar posibles lotes repetidos para evitar doble descuento accidental sobre el mismo lote
+    cantidades_por_lote: Dict[int, float] = {}
+    obs_por_lote: Dict[int, Optional[str]] = {}
+    for item in partidas:
+        lid = int(item["id_lote"])
+        cant = float(item["cantidad"])
+        if cant <= 0:
+            raise ValueError(f"La cantidad a descartar del lote #{lid} debe ser mayor a 0.")
+        cantidades_por_lote[lid] = cantidades_por_lote.get(lid, 0.0) + cant
+        if item.get("observaciones"):
+            obs_por_lote[lid] = item.get("observaciones")
+
+    with engine.begin() as conn:
+        referencia_merma = f"MERMA: {motivo_limpio}"
+        q_insert_mov = text(
+            """
+            INSERT INTO movimientos (
+                tipo_movimiento, id_local_origen, id_local_destino,
+                id_usuario, referencia, observaciones, estado
+            )
+            VALUES (
+                'salida_cocina', :id_local, NULL,
+                :id_usuario, :referencia, :observaciones, 'confirmado'
+            )
+            RETURNING id_movimiento;
+            """
+        )
+        id_movimiento = conn.execute(
+            q_insert_mov,
+            {
+                "id_local": id_local,
+                "id_usuario": id_usuario,
+                "referencia": referencia_merma,
+                "observaciones": observaciones,
+            },
+        ).scalar_one()
+
+        q_stock = text(
+            """
+            SELECT s.cantidad, dc.costo_unitario, p.nombre AS producto, p.unidad_medida, l.codigo_lote_proveedor
+            FROM stock_lote_local AS s
+            JOIN lotes AS l ON l.id_lote = s.id_lote
+            JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+            JOIN productos AS p ON p.id_producto = dc.id_producto
+            WHERE s.id_lote = :id_lote AND s.id_local = :id_local
+            FOR UPDATE OF s
+            """
+        )
+        q_insert_det = text(
+            """
+            INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
+            VALUES (:id_movimiento, :id_lote, :cantidad, :observaciones);
+            """
+        )
+        q_update_stock = text(
+            """
+            UPDATE stock_lote_local
+            SET cantidad = :nuevo_stock, actualizado_en = CURRENT_TIMESTAMP
+            WHERE id_lote = :id_lote AND id_local = :id_local
+            """
+        )
+
+        detalles_procesados = []
+        total_kilos = 0.0
+        costo_total_perdida = 0.0
+
+        for id_lote, cantidad in cantidades_por_lote.items():
+            row = conn.execute(q_stock, {"id_lote": id_lote, "id_local": id_local}).first()
+            if not row:
+                raise ValueError(f"El lote #{id_lote} no cuenta con existencias registradas en este local.")
+
+            stock_actual = float(row[0])
+            costo_unitario = float(row[1]) if row[1] is not None else 0.0
+            producto = row[2]
+            unidad_medida = row[3]
+            codigo_lote_prov = row[4]
+
+            if stock_actual < cantidad:
+                raise ValueError(
+                    f"Stock insuficiente en lote #{id_lote} ({producto}): disponible {stock_actual:.3f}, a descartar {cantidad:.3f}."
+                )
+
+            obs_item = obs_por_lote.get(id_lote) or observaciones
+            conn.execute(
+                q_insert_det,
+                {
+                    "id_movimiento": id_movimiento,
+                    "id_lote": id_lote,
+                    "cantidad": cantidad,
+                    "observaciones": obs_item,
+                },
+            )
+
+            nuevo_stock = stock_actual - cantidad
+            conn.execute(
+                q_update_stock,
+                {"nuevo_stock": nuevo_stock, "id_lote": id_lote, "id_local": id_local},
+            )
+
+            costo_perdida = cantidad * costo_unitario
+            total_kilos += cantidad
+            costo_total_perdida += costo_perdida
+            detalles_procesados.append(
+                {
+                    "id_lote": id_lote,
+                    "producto": producto,
+                    "codigo_lote_proveedor": codigo_lote_prov,
+                    "unidad_medida": unidad_medida,
+                    "cantidad": cantidad,
+                    "costo_unitario": costo_unitario,
+                    "costo_total_perdida": costo_perdida,
+                    "nuevo_stock": nuevo_stock,
+                }
+            )
+
+        return {
+            "id_movimiento": id_movimiento,
+            "motivo": motivo_limpio,
+            "total_partidas": len(detalles_procesados),
+            "total_kilos": total_kilos,
+            "costo_total_perdida": costo_total_perdida,
+            "partidas": detalles_procesados,
         }
 
 
