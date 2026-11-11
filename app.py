@@ -5,7 +5,6 @@ from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
-import streamlit.components.v1 as components
 
 try:
     import plotly.express as px
@@ -212,7 +211,7 @@ def _render_panel_top7_traslado(
                 "id_lote", "producto", "dias_para_vencer", "estado_alerta",
                 "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor"
             ]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=240,
             on_select="rerun",
@@ -246,7 +245,7 @@ def _render_panel_top7_traslado(
             )
         with col_btn1:
             add_caption = f"{btn_add_label} ({len(selected_rows)})" if selected_rows else btn_add_label
-            if st.button(add_caption, key=btn_add_key, use_container_width=True, help=btn_add_help):
+            if st.button(add_caption, key=btn_add_key, width="stretch", help=btn_add_help):
                 filas_a_cargar = df_top.iloc[selected_rows] if selected_rows else df_top[df_top["id_lote"] == lote_sel]
                 agregados = _cargar_items_a_carro(carro_key, filas_a_cargar)
                 if agregados > 0:
@@ -254,7 +253,7 @@ def _render_panel_top7_traslado(
                 else:
                     st.info(f"Las partidas seleccionadas ya se encuentran cargadas en {guia_nombre}.")
         with col_btn2:
-            if st.button("⚡ Cargar 7", key=btn_all_key, use_container_width=True, help=btn_all_help):
+            if st.button("⚡ Cargar 7", key=btn_all_key, width="stretch", help=btn_all_help):
                 agregados_all = _cargar_items_a_carro(carro_key, df_top)
                 if agregados_all > 0:
                     st.toast(f"{toast_icon} Se cargaron {agregados_all} partidas críticas a {guia_nombre}.", icon="🚀")
@@ -310,7 +309,7 @@ def _render_guia_preview_editor(
                 "id_lote", "producto", "dias_para_vencer",
                 "stock_disponible", "cantidad", "subtotal_valor"
             ]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             num_rows="dynamic",
             key=editor_key,
@@ -525,28 +524,28 @@ def _render_manifiesto_traslados_fragment(
                     btn_emitir_global = st.button(
                         f"🚚 Confirmar y Emitir Ambas Guías ({len(st.session_state['carro_ida_items'])} Ida + {len(st.session_state['carro_retorno_items'])} Retorno)",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         key="btn_emitir_ambas",
                     )
                 elif hay_ida:
                     btn_emitir_global = st.button(
                         f"🚚 Confirmar y Emitir Guía de Despacho de IDA ({len(st.session_state['carro_ida_items'])} partidas | {tot_kg_ida:.2f} kg)",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         key="btn_emitir_ida_solo",
                     )
                 else:
                     btn_emitir_global = st.button(
                         f"🔄 Confirmar y Emitir Guía de RETORNO ({len(st.session_state['carro_retorno_items'])} partidas | {tot_kg_ret:.2f} kg)",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         key="btn_emitir_ret_solo",
                     )
 
             with col_btn_emision2:
                 st.button(
                     "🗑️ Vaciar Todo el Manifiesto",
-                    use_container_width=True,
+                    width="stretch",
                     key="btn_vaciar_todo",
                     on_click=_limpiar_carros_traslado,
                     args=("carro_ida_items", "carro_retorno_items"),
@@ -614,6 +613,290 @@ def _c_estadisticas_mermas_causa(id_local: Optional[int] = None) -> pd.DataFrame
 @st.cache_data(ttl=60, show_spinner=False)
 def _c_historial_mermas(id_local: Optional[int] = None, limit: int = 50) -> pd.DataFrame:
     return db.load_historial_mermas(id_local=id_local, limit=limit)
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def _c_datos_mermas(
+    id_local_metricas: Optional[int],
+    id_local_operativo: int,
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    """Carga en paralelo KPIs de mermas, lotes FEFO del local y causas raíz."""
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_res = pool.submit(db.load_resumen_mermas, id_local_metricas)
+        fut_lotes = pool.submit(db.load_top_riesgo_traslado, int(id_local_operativo), 200)
+        fut_causas = pool.submit(db.load_estadisticas_mermas_causa, id_local_metricas)
+        return fut_res.result(), fut_lotes.result(), fut_causas.result()
+
+
+@st.fragment
+def _render_acta_merma_fragment(
+    local_merma_id: int,
+    df_lotes_merma: pd.DataFrame,
+    id_usuario_sesion: Optional[int],
+) -> None:
+    """Fragmento aislado para seleccionar lotes en merma, editar el acta y confirmar baja."""
+    if df_lotes_merma.empty:
+        st.warning("No hay lotes con existencias activas en este local para declarar mermas.")
+        return
+
+    if "carro_merma_items" not in st.session_state:
+        st.session_state["carro_merma_items"] = []
+
+    with st.container(border=True):
+        df_vencidos_merma = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0]
+        val_vencido_local = float(df_vencidos_merma["valor_en_riesgo"].sum()) if not df_vencidos_merma.empty else 0.0
+        val_total_local = float(df_lotes_merma["valor_en_riesgo"].sum())
+
+        col_mh1, col_mh2 = st.columns([2.0, 1.5])
+        with col_mh1:
+            st.markdown(
+                """
+                <div style="margin-bottom:6px;">
+                    <strong style="color:#b91c1c; font-size:1.05rem;">🔴 Grilla de Selección Rápida de Lotes para Baja (FEFO)</strong><br>
+                    <span style="font-size:0.82rem; color:#64748b;">
+                        Marca una o varias filas directamente en la grilla y presiona <b>➕ Cargar Marcas</b>, o usa la carga rápida de vencidos/críticos.
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col_mh2:
+            opc_filtro_merma = {
+                "Todos": "Todos",
+                "Vencidos (<0d)": "Vencidos (<0d)",
+                "Críticos (≤2d)": "Críticos (≤2d)",
+            }
+            filtro_merma = _select_pills(
+                "Filtro rápido:",
+                opc_filtro_merma,
+                key="rad_filtro_lotes_merma",
+                default_key="Todos",
+                label_visibility="collapsed",
+            )
+
+        if filtro_merma == "Vencidos (<0d)":
+            df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0].reset_index(drop=True)
+        elif filtro_merma == "Críticos (≤2d)":
+            df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] <= 2].reset_index(drop=True)
+        else:
+            df_merma_vista = df_lotes_merma.reset_index(drop=True)
+
+        if df_merma_vista.empty:
+            st.info("No hay lotes que coincidan con el filtro seleccionado.")
+        else:
+            sel_merma_event = st.dataframe(
+                df_merma_vista[[
+                    "id_lote", "producto", "dias_para_vencer", "estado_alerta",
+                    "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor", "fecha_vencimiento"
+                ]],
+                width="stretch",
+                hide_index=True,
+                height=260,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=f"tbl_sel_merma_{local_merma_id}_{filtro_merma}",
+                column_config={
+                    "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
+                    "producto": "Materia Prima",
+                    "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
+                    "estado_alerta": "Semáforo",
+                    "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.3f kg"),
+                    "valor_en_riesgo": st.column_config.NumberColumn("Valor Stock", format="$%d"),
+                    "codigo_lote_proveedor": "Ref.",
+                    "fecha_vencimiento": st.column_config.DateColumn("Caducidad", format="YYYY-MM-DD"),
+                },
+            )
+            filas_marcadas = list(sel_merma_event.selection.rows) if sel_merma_event and getattr(sel_merma_event, "selection", None) else []
+
+            lotes_merma_dict = {
+                int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.3f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
+                for _, r in df_merma_vista.iterrows()
+            }
+
+            col_bm0, col_bm1, col_bm2, col_bm3, col_bm4 = st.columns([1.5, 2.3, 0.9, 1.3, 1.0])
+            with col_bm0:
+                if st.button(
+                    f"➕ Cargar Marcas ({len(filas_marcadas)})",
+                    key="btn_add_sel_merma",
+                    disabled=(len(filas_marcadas) == 0),
+                    type="primary" if filas_marcadas else "secondary",
+                    width="stretch",
+                    help="Agrega al acta todos los lotes marcados con checkbox en la tabla superior.",
+                ):
+                    agregados = _cargar_items_a_carro("carro_merma_items", df_merma_vista.iloc[filas_marcadas])
+                    if agregados > 0:
+                        st.toast(f"🗑️ {agregados} lote(s) agregado(s) al Acta de Baja.", icon="📋")
+                    else:
+                        st.info("Los lotes marcados ya estaban cargados en el acta.")
+            with col_bm1:
+                lote_pin_merma = st.selectbox(
+                    "Seleccionar lote puntual:*",
+                    options=list(lotes_merma_dict.keys()),
+                    format_func=lambda k: lotes_merma_dict[k],
+                    key="sel_pin_merma",
+                    label_visibility="collapsed",
+                )
+            with col_bm2:
+                if st.button("➕ Cargar", key="btn_add_one_merma", width="stretch", help="Agrega este lote al Acta de Baja."):
+                    if _cargar_items_a_carro("carro_merma_items", df_merma_vista[df_merma_vista["id_lote"] == lote_pin_merma]):
+                        st.toast(f"🗑️ #{lote_pin_merma} cargado al Acta de Baja.", icon="📋")
+                    else:
+                        st.info("Este lote ya está cargado en el Acta de Baja.")
+            with col_bm3:
+                n_venc = len(df_vencidos_merma)
+                if st.button(
+                    f"⚡ Vencidos ({n_venc})",
+                    key="btn_add_vencidos_merma",
+                    disabled=(n_venc == 0),
+                    width="stretch",
+                    help=f"Carga automáticamente los {n_venc} lotes vencidos (${val_vencido_local:,.0f} CLP).",
+                ):
+                    agregados_v = _cargar_items_a_carro("carro_merma_items", df_vencidos_merma)
+                    if agregados_v > 0:
+                        st.toast(f"⚡ {agregados_v} lote(s) vencido(s) cargado(s) al acta.", icon="🔴")
+                    else:
+                        st.info("Todos los lotes vencidos ya están en el acta.")
+            with col_bm4:
+                if st.button("⚡ Top 7", key="btn_add_top7_merma", width="stretch", help="Carga los 7 lotes más próximos a vencer/vencidos."):
+                    agregados_7 = _cargar_items_a_carro("carro_merma_items", df_lotes_merma.head(7))
+                    if agregados_7 > 0:
+                        st.toast(f"⚡ {agregados_7} lotes críticos cargados al acta.", icon="🚀")
+
+            st.caption(
+                f"Stock activo en sucursal: **{len(df_lotes_merma)} lotes** (${val_total_local:,.0f} CLP) | "
+                f"Vencidos: **{len(df_vencidos_merma)} lotes** (${val_vencido_local:,.0f} CLP)"
+            )
+
+    # PANEL 2: VISTA PREVIA Y ACTA DE BAJA CONSOLIDADA
+    with st.container(border=True):
+        st.markdown(
+            """
+            <div style="background:#fee2e2; border-left:4px solid #e63946; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
+                <strong style="color:#991b1b; font-size:1rem;">📝 Vista Previa: Acta de Baja Consolidada por Merma</strong><br>
+                <span style="font-size:0.8rem; color:#7f1d1d;">Ajusta las cantidades exactas a descartar (parcial o total) o elimina filas antes de confirmar.</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        items_merma = st.session_state["carro_merma_items"]
+        if not items_merma:
+            st.info("Aún no hay lotes cargados en el acta. Selecciona filas arriba o usa **➕ Cargar** / **⚡ Vencidos**.")
+            return
+
+        df_editor_merma = pd.DataFrame(items_merma)
+        edited_merma = st.data_editor(
+            df_editor_merma[[
+                "id_lote", "producto", "dias_para_vencer",
+                "stock_disponible", "cantidad", "subtotal_valor"
+            ]],
+            width="stretch",
+            hide_index=True,
+            num_rows="dynamic",
+            key="editor_acta_merma",
+            column_config={
+                "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
+                "producto": st.column_config.TextColumn("Insumo", disabled=True),
+                "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
+                "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.3f kg"),
+                "cantidad": st.column_config.NumberColumn("A Descartar (kg)", min_value=0.001, format="%.3f", required=True),
+                "subtotal_valor": st.column_config.NumberColumn("Pérdida Est.", disabled=True, format="$%d"),
+            },
+        )
+
+        nuevos_items_merma = []
+        for _, r_ed in edited_merma.iterrows():
+            match_orig = next((x for x in items_merma if x["id_lote"] == r_ed["id_lote"]), None)
+            if match_orig:
+                cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
+                match_orig["cantidad"] = cant_real
+                match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
+                nuevos_items_merma.append(match_orig)
+        st.session_state["carro_merma_items"] = nuevos_items_merma
+
+        tot_kg_merma = sum(it["cantidad"] for it in nuevos_items_merma)
+        tot_val_merma = sum(it["subtotal_valor"] for it in nuevos_items_merma)
+
+        col_tm1, col_tm2, col_tm3 = st.columns(3)
+        col_tm1.metric("Lotes en Acta", f"{len(nuevos_items_merma)} lote(s)")
+        col_tm2.metric("Total Volumen a Descartar", f"{tot_kg_merma:.3f} kg")
+        col_tm3.metric("Pérdida Financiera Estimada", f"${tot_val_merma:,.0f} CLP")
+
+        st.markdown("---")
+        iconos_causa = {
+            "Ruptura de cadena de frío en cocina": "❄️ Ruptura de frío",
+            "Vencimiento de fecha límite FEFO": "🔴 Vencimiento FEFO",
+            "Deterioro organoléptico en recepción": "⚠️ Deterioro recepción",
+            "Manipulación / Error de porcionado": "🔪 Error porcionado",
+        }
+        opc_motivos = {k: iconos_causa.get(k, k) for k in db.CAUSAS_RAIZ_MERMA}
+        motivo_sel = _select_pills(
+            "Tipificación Obligatoria de Causa Raíz:*",
+            opc_motivos,
+            key="sel_motivo_merma_cons",
+        )
+
+        col_m_f1, col_m_f2 = st.columns([1.0, 1.5])
+        with col_m_f1:
+            opc_usr_merma, idx_usr_merma = get_opciones_usuarios(int(local_merma_id), id_usuario_sesion)
+            id_usr_merma = st.selectbox(
+                "Autorizado / Declarado por:*",
+                options=list(opc_usr_merma.keys()) if opc_usr_merma else [None],
+                index=idx_usr_merma,
+                format_func=lambda k: opc_usr_merma[k] if k is not None else "Operador Central",
+                key="sel_usuario_merma",
+            )
+        with col_m_f2:
+            obs_merma = st.text_area(
+                "Justificación sanitaria / Causa Raíz detallada:*",
+                placeholder="Ej. Retiro preventivo por vencimiento FEFO / ruptura de frío...",
+                height=85,
+                key="txt_obs_merma_cons",
+                help="Obligatorio para mantener el expediente forense de control de pérdidas.",
+            )
+
+        col_btn_m1, col_btn_m2 = st.columns([2.4, 1])
+        with col_btn_m1:
+            btn_declarar_merma = st.button(
+                f"🗑️ Confirmar y Procesar Baja Consolidada ({len(nuevos_items_merma)} lote(s) | {tot_kg_merma:.2f} kg)",
+                type="primary",
+                disabled=(len(nuevos_items_merma) == 0),
+                width="stretch",
+                key="btn_confirmar_merma_cons",
+            )
+        with col_btn_m2:
+            st.button(
+                "🗑️ Vaciar Lista",
+                width="stretch",
+                key="btn_vaciar_merma_cons",
+                on_click=_limpiar_carros_traslado,
+                args=("carro_merma_items",),
+            )
+
+        if btn_declarar_merma:
+            if not obs_merma.strip():
+                st.warning("⚠️ Debe ingresar una justificación o detalle de causa raíz antes de confirmar el acta.")
+            else:
+                try:
+                    res_mc = db.registrar_merma_consolidada(
+                        id_local=int(local_merma_id),
+                        partidas=nuevos_items_merma,
+                        motivo=motivo_sel,
+                        observaciones=obs_merma.strip(),
+                        id_usuario=int(id_usr_merma) if id_usr_merma is not None else None,
+                    )
+                    res_mc["responsable"] = (
+                        opc_usr_merma.get(id_usr_merma, "Operador Central")
+                        if id_usr_merma
+                        else "Operador Central"
+                    )
+                    st.session_state["carro_merma_items"] = []
+                    st.session_state["voucher_merma_consolidado"] = res_mc
+                    st.session_state["ultimo_pdf_merma"] = {"id_movimiento": res_mc["id_movimiento"]}
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al procesar la baja consolidada por merma: {e}")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -765,11 +1048,11 @@ def _render_quick_pdf_banner(
                 data=pdf_bytes,
                 file_name=filename_fn(doc_info),
                 mime="application/pdf",
-                use_container_width=True,
+                width="stretch",
                 key=btn_key,
             )
         with col_pdf_close:
-            if st.button("✖️ Ocultar", key=f"{btn_key}_dismiss", use_container_width=True):
+            if st.button("✖️ Ocultar", key=f"{btn_key}_dismiss", width="stretch"):
                 st.session_state.pop(session_key, None)
                 st.rerun()
     except Exception as err:
@@ -820,7 +1103,7 @@ def render_echarts(options: dict, height: int = 280, key: str = "chart"):
     </body>
     </html>
     """
-    components.html(html_code, height=height + 8)
+    st.iframe(html_code, width="stretch", height=height + 8)
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL Y ESTILOS
@@ -1713,7 +1996,7 @@ txt_rsk = f"${val_rsk / 1_000_000:.1f}M" if val_rsk >= 1_000_000 else f"${val_rs
 col_s3.metric("Valor Total", txt_tot)
 col_s4.metric("En Riesgo", txt_rsk)
 
-if st.sidebar.button("🔄 Sincronizar Datos en Vivo", use_container_width=True, help="Limpia la caché local y recarga datos frescos desde PostgreSQL Neon."):
+if st.sidebar.button("🔄 Sincronizar Datos en Vivo", width="stretch", help="Limpia la caché local y recarga datos frescos desde PostgreSQL Neon."):
     st.cache_data.clear()
     st.rerun()
 
@@ -1729,7 +2012,7 @@ if os.path.exists(manual_pdf_path):
             data=f_pdf.read(),
             file_name="Manual_de_Usuario_MamaQocha.pdf",
             mime="application/pdf",
-            use_container_width=True,
+            width="stretch",
         )
 
 st.sidebar.caption("Proyecto Académico Demo Funcional")
@@ -2199,7 +2482,7 @@ if nav_tab == "alertas":
                         df_sugeridos[[
                             "receta", "categoria", "insumo_critico", "kg_en_riesgo", "porciones", "precio_carta", "venta_recuperable", "dias_restantes", "locales"
                         ]],
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config={
                             "receta": "Plato Recomendado",
@@ -2398,7 +2681,7 @@ if nav_tab == "alertas":
                     yaxis=dict(tickformat="$,.0f"),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                st.plotly_chart(fig_scatter, width="stretch")
             else:
                 st.dataframe(inventario_df[["producto", "local", "dias_para_vencer", "valor_inventario"]])
 
@@ -2579,9 +2862,18 @@ if nav_tab == "alertas":
         st.markdown("#### 📋 Detalle de Lotes en Stock")
         col_filtro1, col_filtro2 = st.columns([1, 2])
         with col_filtro1:
-            filtro_alerta = st.selectbox(
+            OPC_FILTRO_ALERTA = {
+                "Todos los niveles": "🌐 Todos",
+                "🔴 Vencido": "🔴 Vencido",
+                "🟠 Crítico (≤ 7 días)": "🟠 Crítico (≤7d)",
+                "🟡 Preventivo (8-30 días)": "🟡 Preventivo (8-30d)",
+                "🟢 Óptimo (> 30 días)": "🟢 Óptimo (>30d)",
+            }
+            filtro_alerta = _select_pills(
                 "Filtrar por nivel de riesgo:",
-                ["Todos los niveles", "🔴 Vencido", "🟠 Crítico (≤ 7 días)", "🟡 Preventivo (8-30 días)", "🟢 Óptimo (> 30 días)"],
+                OPC_FILTRO_ALERTA,
+                key="pill_filtro_alerta",
+                default_key="Todos los niveles",
             )
         with col_filtro2:
             filtro_busqueda = st.text_input(
@@ -2636,7 +2928,7 @@ if nav_tab == "alertas":
 
         st.dataframe(
             datos_filtrados[columnas_mostrar],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "estado_alerta": st.column_config.TextColumn("Alerta", width="medium"),
@@ -2706,11 +2998,11 @@ elif nav_tab == "recepcion":
                     local_receptor_id = id_local_activo
                     st.text_input("Local receptor (fijado por sesión):", value=nombre_local_activo, disabled=True)
                 else:
-                    opciones_rec = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
-                    local_receptor_id = st.selectbox(
+                    opciones_rec = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
+                    local_receptor_id = _select_pills(
                         "Local receptor del insumo:*",
-                        options=list(opciones_rec.keys()),
-                        format_func=lambda k: opciones_rec[k],
+                        opciones_rec,
+                        key="pill_rec_local",
                     )
 
                 dict_proveedores = {row["id_proveedor"]: f"{row['nombre']} ({row['rut']})" for _, row in proveedores_df.iterrows()}
@@ -2722,7 +3014,12 @@ elif nav_tab == "recepcion":
 
                 col_doc1, col_doc2 = st.columns(2)
                 with col_doc1:
-                    tipo_doc = st.selectbox("Tipo de documento:*", ["factura", "guia", "boleta"])
+                    tipo_doc = _select_pills(
+                        "Tipo de documento:*",
+                        {"factura": "🧾 Factura", "guia": "🚚 Guía", "boleta": "📄 Boleta"},
+                        key="pill_rec_tipo_doc",
+                        default_key="factura",
+                    )
                 with col_doc2:
                     num_doc = st.text_input("N° Documento:*", placeholder="FAC-2026-0045").strip()
 
@@ -2788,7 +3085,7 @@ elif nav_tab == "recepcion":
                 )
 
             st.markdown("---")
-            submit_registro = st.form_submit_button("📥 Registrar Recepción e Incorporar al Stock", type="primary", use_container_width=True)
+            submit_registro = st.form_submit_button("📥 Registrar Recepción e Incorporar al Stock", type="primary", width="stretch")
 
     if submit_registro:
         if not num_doc:
@@ -2883,23 +3180,28 @@ elif nav_tab == "cocina":
                 "🚀 Abrir Terminal KDS",
                 url=url_terminal,
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 help="Abre la pantalla táctil de cocina en una nueva pestaña"
             )
             st.caption(f"📍 Conexión: `{api_base_url}`")
 
-    subtab_recetas, subtab_lote_manual, subtab_audit_offline = st.tabs(
-        [
-            "📋 Producción por Recetas (Comanda / Turno)", 
-            "📦 Salida Manual por Lote Individual",
-            "🛰️ Bitácora de Sincronización Offline (Outbox)"
-        ]
+    COCINA_SUBTABS = {
+        "recetas": "📋 Producción por Recetas (Comanda / Turno)",
+        "manual": "📦 Salida Manual por Lote Individual",
+        "outbox": "🛰️ Bitácora Offline (Outbox)",
+    }
+    cocina_sub = _select_pills(
+        "Modo de operación en cocina:",
+        COCINA_SUBTABS,
+        key="nav_sub_cocina",
+        default_key="recetas",
+        label_visibility="collapsed",
     )
 
     # --------------------------------------------------------------------------
     # SUBTAB: PRODUCCIÓN POR RECETAS ESTANDARIZADAS
     # --------------------------------------------------------------------------
-    with subtab_recetas:
+    if cocina_sub == "recetas":
         st.markdown("#### 🍽️ Elaboración de Recetas y Descuento Automático FEFO")
         st.caption(
             "Configura las comandas del turno (ej. 10 Ceviches, 5 Lomo Saltado). El motor calcula el escandallo, "
@@ -2959,10 +3261,17 @@ elif nav_tab == "cocina":
 
             col_cf1, col_cf2, col_cf3 = st.columns([1.2, 1.2, 1.6])
             with col_cf1:
-                turno_prod = st.selectbox(
+                OPC_TURNOS_COCINA = {
+                    "Almuerzo (12:00 - 16:00)": "☀️ Almuerzo",
+                    "Tarde (16:00 - 20:00)": "🌤️ Tarde",
+                    "Cena (20:00 - 00:00)": "🌙 Cena",
+                    "Evento Especial": "🎉 Evento",
+                }
+                turno_prod = _select_pills(
                     "Turno de Cocina / Servicio:*",
-                    ["Almuerzo (12:00 - 16:00)", "Tarde (16:00 - 20:00)", "Cena (20:00 - 00:00)", "Evento Especial"],
-                    key="sel_turno_produccion",
+                    OPC_TURNOS_COCINA,
+                    key="sel_turno_produccion_pills",
+                    default_key="Almuerzo (12:00 - 16:00)",
                 )
             with col_cf2:
                 opc_chef_prod, idx_chef_prod = get_opciones_usuarios(int(local_cocina_id), id_usuario_sesion)
@@ -3059,7 +3368,7 @@ elif nav_tab == "cocina":
                     })
 
                 simulacion_df = pd.DataFrame(filas_simulacion)
-                st.dataframe(simulacion_df, use_container_width=True, hide_index=True)
+                st.dataframe(simulacion_df, width="stretch", hide_index=True)
 
                 col_res1, col_res2, col_res3 = st.columns([1, 1, 1.5])
                 col_res1.metric("Total Platos a Elaborar", f"{sum(orden_platos.values())} u.")
@@ -3075,7 +3384,7 @@ elif nav_tab == "cocina":
                     "🍳 Confirmar y Descontar Producción por FEFO",
                     type="primary",
                     disabled=hay_faltante,
-                    use_container_width=True,
+                    width="stretch",
                     key="btn_exec_produccion_recetas",
                 )
 
@@ -3099,7 +3408,7 @@ elif nav_tab == "cocina":
     # --------------------------------------------------------------------------
     # SUBTAB: SALIDA MANUAL POR LOTE INDIVIDUAL
     # --------------------------------------------------------------------------
-    with subtab_lote_manual:
+    elif cocina_sub == "manual":
         st.markdown("#### 📦 Salida Manual por Lote Específico")
         st.caption(
             "Permite dar salida puntual a un lote específico para consumo directo, pruebas de sabor o calibración de partidas."
@@ -3200,7 +3509,7 @@ elif nav_tab == "cocina":
                         obs_cocina = st.text_area("Observaciones del consumo:", placeholder="Porciones elaboradas, control de mermas...", height=60)
 
                     st.markdown("---")
-                    btn_salida_cocina = st.form_submit_button("🍳 Confirmar Salida a Cocina", type="primary", use_container_width=True)
+                    btn_salida_cocina = st.form_submit_button("🍳 Confirmar Salida a Cocina", type="primary", width="stretch")
 
             if btn_salida_cocina:
                 try:
@@ -3231,7 +3540,7 @@ elif nav_tab == "cocina":
     # --------------------------------------------------------------------------
     # SUBTAB: BITÁCORA DE SINCRONIZACIÓN OFFLINE (OUTBOX AUDIT)
     # --------------------------------------------------------------------------
-    with subtab_audit_offline:
+    elif cocina_sub == "outbox":
         st.markdown("#### 🛰️ Bitácora de Sincronización de Terminales Offline (Outbox Pattern)")
         st.caption(
             "Auditoría técnica de transacciones originadas de forma autónoma en las pantallas de cocina (PWA). "
@@ -3258,7 +3567,7 @@ elif nav_tab == "cocina":
 
             st.dataframe(
                 df_sync,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "id_evento": st.column_config.TextColumn("UUID Origen", width="medium"),
@@ -3507,7 +3816,7 @@ elif nav_tab == "traslados":
                         key="sel_usr_dest_man",
                     )
 
-                btn_traslado_manual = st.form_submit_button("🚚 Ejecutar Traslado Individual", type="primary", use_container_width=True)
+                btn_traslado_manual = st.form_submit_button("🚚 Ejecutar Traslado Individual", type="primary", width="stretch")
 
             if btn_traslado_manual:
                 try:
@@ -3559,7 +3868,7 @@ elif nav_tab == "traslados":
                     "despachado_por", "recibido_por",
                     "producto", "codigo_lote_proveedor", "cantidad", "unidad_medida", "referencia", "observaciones"
                 ]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "id_movimiento": "N° Guía",
@@ -3637,7 +3946,24 @@ elif nav_tab == "mermas":
         btn_key="btn_pdf_quick_merma",
     )
 
-    resumen_mermas = _c_resumen_mermas(id_local=id_local_activo)
+    if id_local_activo:
+        local_merma_id = id_local_activo
+        st.info(f"📍 Registrando baja por merma para: **{nombre_local_activo}**")
+    else:
+        opciones_locales_merma = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
+        local_merma_id = _select_pills(
+            "Seleccionar Local donde ocurrió la merma:*",
+            opciones_locales_merma,
+            key="sel_local_merma_pills",
+        )
+
+    if st.session_state.get("carro_merma_local_id") != int(local_merma_id):
+        st.session_state["carro_merma_items"] = []
+        st.session_state["carro_merma_local_id"] = int(local_merma_id)
+    if "carro_merma_items" not in st.session_state:
+        st.session_state["carro_merma_items"] = []
+
+    resumen_mermas, df_lotes_merma, df_est_causas = _c_datos_mermas(id_local_activo, int(local_merma_id))
 
     c_m1, c_m2, c_m3 = st.columns(3)
     with c_m1:
@@ -3674,306 +4000,11 @@ elif nav_tab == "mermas":
             unsafe_allow_html=True,
         )
 
-    if id_local_activo:
-        local_merma_id = id_local_activo
-        st.info(f"📍 Registrando baja por merma para: **{nombre_local_activo}**")
-    else:
-        opciones_locales_merma = {int(row["id_local"]): row["nombre"] for _, row in locales_df.iterrows()}
-        local_merma_id = _select_pills(
-            "Seleccionar Local donde ocurrió la merma:*",
-            opciones_locales_merma,
-            key="sel_local_merma_pills",
-        )
-
-    if st.session_state.get("carro_merma_local_id") != int(local_merma_id):
-        st.session_state["carro_merma_items"] = []
-        st.session_state["carro_merma_local_id"] = int(local_merma_id)
-    if "carro_merma_items" not in st.session_state:
-        st.session_state["carro_merma_items"] = []
-
-    def _agregar_lote_carro_merma(fila_lote) -> bool:
-        lid = int(fila_lote["id_lote"])
-        if any(it["id_lote"] == lid for it in st.session_state["carro_merma_items"]):
-            return False
-        st.session_state["carro_merma_items"].append({
-            "id_lote": lid,
-            "producto": str(fila_lote["producto"]),
-            "codigo_lote_proveedor": str(fila_lote["codigo_lote_proveedor"]),
-            "dias_para_vencer": int(fila_lote["dias_para_vencer"]),
-            "stock_disponible": float(fila_lote["stock_disponible"]),
-            "cantidad": float(fila_lote["stock_disponible"]),
-            "costo_unitario": float(fila_lote["costo_unitario"]),
-            "subtotal_valor": float(fila_lote["valor_en_riesgo"]),
-            "unidad_medida": str(fila_lote["unidad_medida"]),
-        })
-        return True
-
-    df_lotes_merma = _c_top_riesgo_traslado(int(local_merma_id), limit=200)
-
-    if df_lotes_merma.empty:
-        st.warning("No hay lotes con existencias activas en este local para declarar mermas.")
-    else:
-        # ----------------------------------------------------------------------
-        # PANEL 1: GRILLA DE SELECCIÓN RÁPIDA DE LOTES (ESTILO TRASLADOS)
-        # ----------------------------------------------------------------------
-        with st.container(border=True):
-            df_vencidos_merma = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0]
-            val_vencido_local = float(df_vencidos_merma["valor_en_riesgo"].sum()) if not df_vencidos_merma.empty else 0.0
-            val_total_local = float(df_lotes_merma["valor_en_riesgo"].sum())
-
-            col_mh1, col_mh2 = st.columns([2.2, 1.3])
-            with col_mh1:
-                st.markdown(
-                    f"""
-                    <div style="margin-bottom:6px;">
-                        <strong style="color:#b91c1c; font-size:1.05rem;">🔴 Grilla de Selección Rápida de Lotes para Baja (FEFO)</strong><br>
-                        <span style="font-size:0.82rem; color:#64748b;">
-                            Marca una o varias filas directamente en la grilla y presiona <b>➕ Cargar Seleccionados</b>, o usa la carga rápida de vencidos/críticos.
-                        </span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            with col_mh2:
-                filtro_merma = st.radio(
-                    "Filtro rápido:",
-                    ["Todos", "Vencidos (<0d)", "Críticos (≤2d)"],
-                    horizontal=True,
-                    key="rad_filtro_lotes_merma",
-                    label_visibility="collapsed",
-                )
-
-            if filtro_merma == "Vencidos (<0d)":
-                df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] < 0].reset_index(drop=True)
-            elif filtro_merma == "Críticos (≤2d)":
-                df_merma_vista = df_lotes_merma[df_lotes_merma["dias_para_vencer"] <= 2].reset_index(drop=True)
-            else:
-                df_merma_vista = df_lotes_merma.reset_index(drop=True)
-
-            if df_merma_vista.empty:
-                st.info("No hay lotes que coincidan con el filtro seleccionado.")
-            else:
-                sel_merma_event = st.dataframe(
-                    df_merma_vista[[
-                        "id_lote", "producto", "dias_para_vencer", "estado_alerta",
-                        "stock_disponible", "valor_en_riesgo", "codigo_lote_proveedor", "fecha_vencimiento"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=260,
-                    on_select="rerun",
-                    selection_mode="multi-row",
-                    key=f"tbl_sel_merma_{local_merma_id}_{filtro_merma}",
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", format="#%d"),
-                        "producto": "Materia Prima",
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", format="%d d"),
-                        "estado_alerta": "Semáforo",
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", format="%.3f kg"),
-                        "valor_en_riesgo": st.column_config.NumberColumn("Valor Stock", format="$%d"),
-                        "codigo_lote_proveedor": "Ref.",
-                        "fecha_vencimiento": st.column_config.DateColumn("Caducidad", format="YYYY-MM-DD"),
-                    },
-                )
-                filas_marcadas = sel_merma_event.selection.rows if sel_merma_event and sel_merma_event.selection else []
-
-                lotes_merma_dict = {
-                    int(r["id_lote"]): f"#{r['id_lote']} {r['producto']} (Vence: {r['dias_para_vencer']}d | Disp: {r['stock_disponible']:.3f} {r['unidad_medida']} | ${r['valor_en_riesgo']:,.0f})"
-                    for _, r in df_merma_vista.iterrows()
-                }
-
-                col_bm0, col_bm1, col_bm2, col_bm3, col_bm4 = st.columns([1.5, 2.3, 0.9, 1.3, 1.0])
-                with col_bm0:
-                    if st.button(
-                        f"➕ Cargar Marcas ({len(filas_marcadas)})",
-                        key="btn_add_sel_merma",
-                        disabled=(len(filas_marcadas) == 0),
-                        type="primary" if filas_marcadas else "secondary",
-                        use_container_width=True,
-                        help="Agrega al acta todos los lotes marcados con checkbox en la tabla superior.",
-                    ):
-                        agregados = sum(
-                            1 for idx in filas_marcadas if _agregar_lote_carro_merma(df_merma_vista.iloc[idx])
-                        )
-                        if agregados > 0:
-                            st.toast(f"🗑️ {agregados} lote(s) agregado(s) al Acta de Baja.", icon="📋")
-                            st.rerun()
-                        else:
-                            st.info("Los lotes marcados ya estaban cargados en el acta.")
-                with col_bm1:
-                    lote_pin_merma = st.selectbox(
-                        "Seleccionar lote puntual:*",
-                        options=list(lotes_merma_dict.keys()),
-                        format_func=lambda k: lotes_merma_dict[k],
-                        key="sel_pin_merma",
-                        label_visibility="collapsed",
-                    )
-                with col_bm2:
-                    if st.button("➕ Cargar", key="btn_add_one_merma", use_container_width=True, help="Agrega este lote al Acta de Baja."):
-                        row_m = df_merma_vista[df_merma_vista["id_lote"] == lote_pin_merma].iloc[0]
-                        if _agregar_lote_carro_merma(row_m):
-                            st.toast(f"🗑️ #{lote_pin_merma} {row_m['producto']} cargado al Acta de Baja.", icon="📋")
-                            st.rerun()
-                        else:
-                            st.info("Este lote ya está cargado en el Acta de Baja.")
-                with col_bm3:
-                    n_venc = len(df_vencidos_merma)
-                    if st.button(
-                        f"⚡ Vencidos ({n_venc})",
-                        key="btn_add_vencidos_merma",
-                        disabled=(n_venc == 0),
-                        use_container_width=True,
-                        help=f"Carga automáticamente los {n_venc} lotes vencidos (${val_vencido_local:,.0f} CLP).",
-                    ):
-                        agregados_v = sum(
-                            1 for _, r_v in df_vencidos_merma.iterrows() if _agregar_lote_carro_merma(r_v)
-                        )
-                        if agregados_v > 0:
-                            st.toast(f"⚡ {agregados_v} lote(s) vencido(s) cargado(s) al acta.", icon="🔴")
-                            st.rerun()
-                        else:
-                            st.info("Todos los lotes vencidos ya están en el acta.")
-                with col_bm4:
-                    if st.button("⚡ Top 7", key="btn_add_top7_merma", use_container_width=True, help="Carga los 7 lotes más próximos a vencer/vencidos."):
-                        agregados_7 = sum(
-                            1 for _, r_7 in df_lotes_merma.head(7).iterrows() if _agregar_lote_carro_merma(r_7)
-                        )
-                        if agregados_7 > 0:
-                            st.toast(f"⚡ {agregados_7} lotes críticos cargados al acta.", icon="🚀")
-                            st.rerun()
-
-                st.caption(
-                    f"Stock activo en sucursal: **{len(df_lotes_merma)} lotes** (${val_total_local:,.0f} CLP) | "
-                    f"Vencidos: **{len(df_vencidos_merma)} lotes** (${val_vencido_local:,.0f} CLP)"
-                )
-
-        # ----------------------------------------------------------------------
-        # PANEL 2: VISTA PREVIA Y ACTA DE BAJA CONSOLIDADA
-        # ----------------------------------------------------------------------
-        with st.container(border=True):
-            st.markdown(
-                """
-                <div style="background:#fee2e2; border-left:4px solid #e63946; padding:8px 12px; border-radius:4px; margin-bottom:12px;">
-                    <strong style="color:#991b1b; font-size:1rem;">📝 Vista Previa: Acta de Baja Consolidada por Merma</strong><br>
-                    <span style="font-size:0.8rem; color:#7f1d1d;">Ajusta las cantidades exactas a descartar (parcial o total) o elimina filas antes de confirmar.</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            items_merma = st.session_state["carro_merma_items"]
-            if not items_merma:
-                st.info("Aún no hay lotes cargados en el acta. Selecciona filas arriba o usa **➕ Cargar** / **⚡ Vencidos**.")
-            else:
-                df_editor_merma = pd.DataFrame(items_merma)
-                edited_merma = st.data_editor(
-                    df_editor_merma[[
-                        "id_lote", "producto", "dias_para_vencer",
-                        "stock_disponible", "cantidad", "subtotal_valor"
-                    ]],
-                    use_container_width=True,
-                    hide_index=True,
-                    num_rows="dynamic",
-                    key="editor_acta_merma",
-                    column_config={
-                        "id_lote": st.column_config.NumberColumn("Lote", disabled=True, format="#%d"),
-                        "producto": st.column_config.TextColumn("Insumo", disabled=True),
-                        "dias_para_vencer": st.column_config.NumberColumn("Vence", disabled=True, format="%d d"),
-                        "stock_disponible": st.column_config.NumberColumn("Disp.", disabled=True, format="%.3f kg"),
-                        "cantidad": st.column_config.NumberColumn("A Descartar (kg)", min_value=0.001, format="%.3f", required=True),
-                        "subtotal_valor": st.column_config.NumberColumn("Pérdida Est.", disabled=True, format="$%d"),
-                    },
-                )
-
-                nuevos_items_merma = []
-                for _, r_ed in edited_merma.iterrows():
-                    match_orig = next((x for x in items_merma if x["id_lote"] == r_ed["id_lote"]), None)
-                    if match_orig:
-                        cant_real = min(float(r_ed["cantidad"]), float(match_orig["stock_disponible"]))
-                        match_orig["cantidad"] = cant_real
-                        match_orig["subtotal_valor"] = cant_real * match_orig["costo_unitario"]
-                        nuevos_items_merma.append(match_orig)
-                st.session_state["carro_merma_items"] = nuevos_items_merma
-
-                tot_kg_merma = sum(it["cantidad"] for it in nuevos_items_merma)
-                tot_val_merma = sum(it["subtotal_valor"] for it in nuevos_items_merma)
-
-                col_tm1, col_tm2, col_tm3 = st.columns(3)
-                col_tm1.metric("Lotes en Acta", f"{len(nuevos_items_merma)} lote(s)")
-                col_tm2.metric("Total Volumen a Descartar", f"{tot_kg_merma:.3f} kg")
-                col_tm3.metric("Pérdida Financiera Estimada", f"${tot_val_merma:,.0f} CLP")
-
-                st.markdown("---")
-                col_m_f1, col_m_f2 = st.columns(2)
-                with col_m_f1:
-                    iconos_causa = {
-                        "Ruptura de cadena de frío en cocina": "❄️ Ruptura de cadena de frío en cocina",
-                        "Vencimiento de fecha límite FEFO": "🔴 Vencimiento de fecha límite FEFO",
-                        "Deterioro organoléptico en recepción": "⚠️ Deterioro organoléptico en recepción",
-                        "Manipulación / Error de porcionado": "🔪 Manipulación / Error de porcionado",
-                    }
-                    motivo_sel = st.selectbox(
-                        "Tipificación Obligatoria de Causa Raíz:*",
-                        options=list(db.CAUSAS_RAIZ_MERMA),
-                        format_func=lambda k: iconos_causa.get(k, k),
-                        key="sel_motivo_merma_cons",
-                        help="Protocolo estandarizado de clasificación de pérdidas para auditoría e informes (Etapa 2 [19, 24]).",
-                    )
-                    opc_usr_merma, idx_usr_merma = get_opciones_usuarios(int(local_merma_id), id_usuario_sesion)
-                    id_usr_merma = st.selectbox(
-                        "Autorizado / Declarado por:*",
-                        options=list(opc_usr_merma.keys()) if opc_usr_merma else [None],
-                        index=idx_usr_merma,
-                        format_func=lambda k: opc_usr_merma[k] if k is not None else "Operador Central",
-                        key="sel_usuario_merma",
-                    )
-                with col_m_f2:
-                    obs_merma = st.text_area(
-                        "Justificación sanitaria / Causa Raíz detallada:*",
-                        placeholder="Ej. Retiro preventivo por vencimiento FEFO / ruptura de frío...",
-                        height=108,
-                        key="txt_obs_merma_cons",
-                        help="Obligatorio para mantener el expediente forense de control de pérdidas.",
-                    )
-
-                col_btn_m1, col_btn_m2 = st.columns([2.4, 1])
-                with col_btn_m1:
-                    btn_declarar_merma = st.button(
-                        f"🗑️ Confirmar y Procesar Baja Consolidada ({len(nuevos_items_merma)} lote(s) | {tot_kg_merma:.2f} kg)",
-                        type="primary",
-                        disabled=(len(nuevos_items_merma) == 0),
-                        use_container_width=True,
-                        key="btn_confirmar_merma_cons",
-                    )
-                with col_btn_m2:
-                    if st.button("🗑️ Vaciar Lista", use_container_width=True, key="btn_vaciar_merma_cons"):
-                        st.session_state["carro_merma_items"] = []
-                        st.rerun()
-
-                if btn_declarar_merma:
-                    if not obs_merma.strip():
-                        st.warning("⚠️ Debe ingresar una justificación o detalle de causa raíz antes de confirmar el acta.")
-                    else:
-                        try:
-                            res_mc = db.registrar_merma_consolidada(
-                                id_local=int(local_merma_id),
-                                partidas=nuevos_items_merma,
-                                motivo=motivo_sel,
-                                observaciones=obs_merma.strip(),
-                                id_usuario=int(id_usr_merma) if id_usr_merma is not None else None,
-                            )
-                            res_mc["responsable"] = (
-                                opc_usr_merma.get(id_usr_merma, "Operador Central")
-                                if id_usr_merma
-                                else "Operador Central"
-                            )
-                            st.session_state["carro_merma_items"] = []
-                            st.session_state["voucher_merma_consolidado"] = res_mc
-                            st.session_state["ultimo_pdf_merma"] = {"id_movimiento": res_mc["id_movimiento"]}
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error al procesar la baja consolidada por merma: {e}")
+    _render_acta_merma_fragment(
+        local_merma_id=int(local_merma_id),
+        df_lotes_merma=df_lotes_merma,
+        id_usuario_sesion=id_usuario_sesion,
+    )
 
     # ==============================================================================
     # REPORTE ESTADÍSTICO DE CAUSAS RAÍZ (ETAPA 2 INACAP [19, 24])
@@ -3984,8 +4015,6 @@ elif nav_tab == "mermas":
         "Distribución analítica y costo de pérdidas por causa raíz tipificada. "
         "Permite priorizar intervenciones operativas (mantención de frío, compras FEFO o capacitación en porcionado)."
     )
-
-    df_est_causas = _c_estadisticas_mermas_causa(id_local=id_local_activo)
 
     if not df_est_causas.empty and df_est_causas["costo_total_perdida"].sum() > 0:
         col_graf_m, col_tbl_m = st.columns([1.2, 1.3])
@@ -4052,7 +4081,7 @@ elif nav_tab == "mermas":
                 st.markdown("##### 📋 Matriz Cuantitativa de Pérdidas")
                 st.dataframe(
                     df_est_causas,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "causa_raiz": "Causa Raíz Tipificada",
@@ -4075,43 +4104,44 @@ elif nav_tab == "mermas":
                     data=csv_causas,
                     file_name="reporte_causas_merma_etapa2.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                 )
     else:
         st.info("No hay suficientes registros de merma para generar el reporte estadístico.")
 
-    # Historial de Mermas
+    # Historial de Mermas (carga diferida)
     st.markdown("---")
     st.markdown("#### 📋 Libro de Actas de Merma y Desecho")
     st.caption("Registro forense de todas las bajas efectuadas para el control de pérdidas del negocio.")
 
-    hist_mermas = _c_historial_mermas(id_local=id_local_activo, limit=50)
+    if st.toggle("Ver últimas 50 actas de merma registradas", value=False, key="toggle_hist_mermas"):
+        hist_mermas = _c_historial_mermas(id_local=id_local_activo, limit=50)
 
-    if hist_mermas.empty:
-        st.info("No se registran actas de merma para el filtro seleccionado.")
-    else:
-        st.dataframe(
-            hist_mermas[[
-                "id_movimiento", "fecha_movimiento", "local", "producto",
-                "codigo_lote_proveedor", "motivo_merma", "cantidad", "unidad_medida",
-                "costo_unitario", "costo_total_merma", "observaciones"
-            ]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "id_movimiento": "N° Acta",
-                "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
-                "local": "Sucursal",
-                "producto": "Materia Prima",
-                "codigo_lote_proveedor": "Lote Prov.",
-                "motivo_merma": "Causa de la Merma",
-                "cantidad": st.column_config.NumberColumn("Kilos Descartados", format="%.3f"),
-                "unidad_medida": "Unidad",
-                "costo_unitario": st.column_config.NumberColumn("Costo/kg ($)", format="$%d"),
-                "costo_total_merma": st.column_config.NumberColumn("Pérdida Total ($)", format="$%d"),
-                "observaciones": "Causa Raíz / Detalle",
-            },
-        )
+        if hist_mermas.empty:
+            st.info("No se registran actas de merma para el filtro seleccionado.")
+        else:
+            st.dataframe(
+                hist_mermas[[
+                    "id_movimiento", "fecha_movimiento", "local", "producto",
+                    "codigo_lote_proveedor", "motivo_merma", "cantidad", "unidad_medida",
+                    "costo_unitario", "costo_total_merma", "observaciones"
+                ]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "id_movimiento": "N° Acta",
+                    "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
+                    "local": "Sucursal",
+                    "producto": "Materia Prima",
+                    "codigo_lote_proveedor": "Lote Prov.",
+                    "motivo_merma": "Causa de la Merma",
+                    "cantidad": st.column_config.NumberColumn("Kilos Descartados", format="%.3f"),
+                    "unidad_medida": "Unidad",
+                    "costo_unitario": st.column_config.NumberColumn("Costo/kg ($)", format="$%d"),
+                    "costo_total_merma": st.column_config.NumberColumn("Pérdida Total ($)", format="$%d"),
+                    "observaciones": "Causa Raíz / Detalle",
+                },
+            )
 
 # ==============================================================================
 # TAB 6: TRAZABILIDAD POR LOTE CON LÍNEA DE TIEMPO VISUAL
@@ -4123,9 +4153,19 @@ elif nav_tab == "trazabilidad":
         "su ingreso físico, hasta su dispersión en sucursales y consumos en cocina."
     )
 
-    subtab_expediente, subtab_historial = st.tabs(["📦 Ficha de Trazabilidad por Lote", "📋 Registro Global de Movimientos"])
+    TRAZ_SUBTABS = {
+        "expediente": "📦 Ficha de Trazabilidad por Lote",
+        "historial": "📋 Registro Global de Movimientos",
+    }
+    traz_sub = _select_pills(
+        "Vista de auditoría:",
+        TRAZ_SUBTABS,
+        key="nav_sub_trazabilidad",
+        default_key="expediente",
+        label_visibility="collapsed",
+    )
 
-    with subtab_expediente:
+    if traz_sub == "expediente":
         lotes_disponibles = _c_lotes_selector()
         if lotes_disponibles.empty:
             st.info("No existen lotes registrados en la base de datos.")
@@ -4187,7 +4227,7 @@ elif nav_tab == "trazabilidad":
                         data=reportes_pdf.generar_pdf_expediente_lote(trazabilidad),
                         file_name=f"Expediente_SEREMI_Lote_{info['id_lote']}.pdf",
                         mime="application/pdf",
-                        use_container_width=True,
+                        width="stretch",
                         key=f"btn_pdf_exp_lote_{info['id_lote']}",
                     )
 
@@ -4244,7 +4284,7 @@ elif nav_tab == "trazabilidad":
                             else:
                                 st.dataframe(
                                     stock_locales_df,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                     column_config={
                                         "local": "Sucursal",
@@ -4264,7 +4304,7 @@ elif nav_tab == "trazabilidad":
                             else:
                                 st.dataframe(
                                     mov_df,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                     column_config={
                                         "id_movimiento": "ID",
@@ -4279,7 +4319,7 @@ elif nav_tab == "trazabilidad":
                                     },
                                 )
 
-    with subtab_historial:
+    elif traz_sub == "historial":
         st.markdown("#### 📋 Libro de Movimientos de Inventario (Últimas Operaciones)")
         st.caption("Bitácora cronológica de traslados entre sucursales y despachos para consumo en cocina.")
 
@@ -4290,7 +4330,7 @@ elif nav_tab == "trazabilidad":
         else:
             st.dataframe(
                 historial_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "id_movimiento": "N°",
@@ -4401,15 +4441,15 @@ elif nav_tab == "reportes":
                     file_name=f"Expediente_SEREMI_Lote_{info_l['id_lote']}.pdf",
                     mime="application/pdf",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                     key=f"rep_btn_pdf_lote_{info_l['id_lote']}",
                 )
                 if not movs_l.empty:
                     st.markdown("##### 👥 Manipuladores y Custodia del Lote")
-                    st.dataframe(movs_l, use_container_width=True, hide_index=True)
+                    st.dataframe(movs_l, width="stretch", hide_index=True)
                 if not stock_l.empty:
                     st.markdown("##### 📦 Stock Remanente por Sucursal")
-                    st.dataframe(stock_l, use_container_width=True, hide_index=True)
+                    st.dataframe(stock_l, width="stretch", hide_index=True)
     else:
         REP_CONFIG = {
             "merma": {
@@ -4565,13 +4605,13 @@ elif nav_tab == "reportes":
                     data=libro_bytes,
                     file_name=f"{cfg['libro_name']}_{rep_desde.strftime('%Y%m%d')}_{rep_hasta.strftime('%Y%m%d')}.pdf",
                     mime="application/pdf",
-                    use_container_width=True,
+                    width="stretch",
                     key=f"btn_libro_{rep_tipo}",
                 )
 
             st.dataframe(
                 df_docs[cfg["cols"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config=cfg["col_cfg"],
             )
@@ -4622,7 +4662,7 @@ elif nav_tab == "reportes":
                         file_name=f"{cfg['file_pref']}_{folio_sel}.pdf",
                         mime="application/pdf",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         key=f"btn_print_ind_{rep_tipo}_{folio_sel}",
                     )
 
@@ -4648,7 +4688,7 @@ elif nav_tab == "reportes":
                         )
                     if cab_p.get("observaciones"):
                         st.caption(f"Observaciones: {cab_p['observaciones']}")
-                    st.dataframe(items_p, use_container_width=True, hide_index=True)
+                    st.dataframe(items_p, width="stretch", hide_index=True)
 
 # ==============================================================================
 # TAB 8: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
@@ -4660,19 +4700,24 @@ elif nav_tab == "maestros":
         "Las altas y modificaciones se sincronizan de inmediato con los formularios de recepción e inventario."
     )
 
-    subtab_m_prov, subtab_m_prod, subtab_m_recetas, subtab_m_usuarios = st.tabs(
-        [
-            "🏢 Catálogo de Proveedores",
-            "🥩 Catálogo de Materias Primas",
-            "🍽️ Fichas Técnicas de Recetas",
-            "👥 Personal y Usuarios (Trazabilidad)",
-        ]
+    MAESTROS_SUBTABS = {
+        "prov": "🏢 Catálogo de Proveedores",
+        "prod": "🥩 Catálogo de Materias Primas",
+        "recetas": "🍽️ Fichas Técnicas de Recetas",
+        "usuarios": "👥 Personal y Usuarios (Trazabilidad)",
+    }
+    maestros_sub = _select_pills(
+        "Catálogo maestro:",
+        MAESTROS_SUBTABS,
+        key="nav_sub_maestros",
+        default_key="prov",
+        label_visibility="collapsed",
     )
 
     # --------------------------------------------------------------------------
     # SUBTAB: PROVEEDORES
     # --------------------------------------------------------------------------
-    with subtab_m_prov:
+    if maestros_sub == "prov":
         todos_prov_df = _c_proveedores(solo_activos=False)
 
         col_p_tbl, col_p_act = st.columns([1.5, 1])
@@ -4686,7 +4731,7 @@ elif nav_tab == "maestros":
                     todos_prov_df[[
                         "id_proveedor", "nombre", "rut", "telefono", "correo", "activo"
                     ]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "id_proveedor": st.column_config.NumberColumn("ID", width="small"),
@@ -4718,7 +4763,7 @@ elif nav_tab == "maestros":
                         p_dir = st.text_input("Dirección comercial:", placeholder="Av. Los Aromos 450")
                         p_act = st.checkbox("Proveedor Habilitado (Activo)", value=True)
 
-                        btn_crear_prov = st.form_submit_button("💾 Guardar Proveedor", type="primary", use_container_width=True)
+                        btn_crear_prov = st.form_submit_button("💾 Guardar Proveedor", type="primary", width="stretch")
 
                     if btn_crear_prov:
                         if not p_nom.strip():
@@ -4766,7 +4811,7 @@ elif nav_tab == "maestros":
                             ed_dir = st.text_input("Dirección:", value=str(fila_edit_p["direccion"] or ""))
                             ed_act = st.checkbox("Proveedor Habilitado (Activo)", value=bool(fila_edit_p["activo"]))
 
-                            btn_update_prov = st.form_submit_button("🔄 Actualizar Proveedor", type="primary", use_container_width=True)
+                            btn_update_prov = st.form_submit_button("🔄 Actualizar Proveedor", type="primary", width="stretch")
 
                         if btn_update_prov:
                             if not ed_nom.strip():
@@ -4791,7 +4836,7 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     # SUBTAB: PRODUCTOS
     # --------------------------------------------------------------------------
-    with subtab_m_prod:
+    elif maestros_sub == "prod":
         todos_prod_df = _c_productos(solo_activos=False)
 
         col_pr_tbl, col_pr_act = st.columns([1.5, 1])
@@ -4805,7 +4850,7 @@ elif nav_tab == "maestros":
                     todos_prod_df[[
                         "id_producto", "nombre", "unidad_medida", "descripcion", "activo"
                     ]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "id_producto": st.column_config.NumberColumn("ID", width="small"),
@@ -4836,7 +4881,7 @@ elif nav_tab == "maestros":
                         pr_desc = st.text_area("Descripción / Especificaciones:", placeholder="Corte fresco, grado sushi...", height=75)
                         pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=True)
 
-                        btn_crear_prod = st.form_submit_button("💾 Guardar Producto", type="primary", use_container_width=True)
+                        btn_crear_prod = st.form_submit_button("💾 Guardar Producto", type="primary", width="stretch")
 
                     if btn_crear_prod:
                         if not pr_nom.strip():
@@ -4881,7 +4926,7 @@ elif nav_tab == "maestros":
                             ed_pr_desc = st.text_area("Descripción:", value=str(fila_edit_pr["descripcion"] or ""), height=75)
                             ed_pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=bool(fila_edit_pr["activo"]))
 
-                            btn_update_prod = st.form_submit_button("🔄 Actualizar Producto", type="primary", use_container_width=True)
+                            btn_update_prod = st.form_submit_button("🔄 Actualizar Producto", type="primary", width="stretch")
 
                         if btn_update_prod:
                             if not ed_pr_nom.strip():
@@ -4904,7 +4949,7 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     # SUBTAB: FICHAS TÉCNICAS DE RECETAS (ESCANDALLO)
     # --------------------------------------------------------------------------
-    with subtab_m_recetas:
+    elif maestros_sub == "recetas":
         st.markdown("##### 🍽️ Fichas Técnicas y Escandallo de Recetas")
         st.caption(
             "Estandarización de porciones, gramajes e insumos cárnicos/marinos para cada plato del menú de Mamá Qocha. "
@@ -4926,7 +4971,7 @@ elif nav_tab == "maestros":
                 recetas_cat_df[[
                     "id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min", "escandallo_ingredientes", "activo"
                 ]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "id_receta": st.column_config.NumberColumn("ID", width="small"),
@@ -4944,7 +4989,7 @@ elif nav_tab == "maestros":
                     recetas_det_df[[
                         "receta", "categoria", "ingrediente", "cantidad_kg", "unidad_medida", "precio_venta"
                     ]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "receta": "Plato",
@@ -4959,7 +5004,7 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     # SUBTAB: USUARIOS Y PERSONAL OPERATIVO (TRAZABILIDAD Y FIRMA PIN)
     # --------------------------------------------------------------------------
-    with subtab_m_usuarios:
+    elif maestros_sub == "usuarios":
         todos_usr_df = _c_usuarios(solo_activos=False)
 
         col_u_tbl, col_u_act = st.columns([1.5, 1])
@@ -4978,7 +5023,7 @@ elif nav_tab == "maestros":
                     df_u_show[[
                         "id_usuario", "nombre", "nombre_usuario", "rol", "local_nombre", "pin", "activo"
                     ]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "id_usuario": st.column_config.NumberColumn("ID", width="small"),
@@ -5009,7 +5054,7 @@ elif nav_tab == "maestros":
                 "operador": "Operador General",
             }
 
-            opciones_locales_usr = {None: "🌐 Todos los Locales (Corporativo)"}
+            opciones_locales_usr = {0: "🌐 Todos (Corporativo)"}
             for _, r_loc in locales_df.iterrows():
                 opciones_locales_usr[int(r_loc["id_local"])] = f"📍 {r_loc['nombre']}"
 
@@ -5019,20 +5064,23 @@ elif nav_tab == "maestros":
                     with st.form("form_alta_usuario", clear_on_submit=True):
                         u_nom = st.text_input("Nombre y Apellido:*", placeholder="Ej. Carlos Mendoza")
                         u_uname = st.text_input("Nombre de usuario (Login):*", placeholder="Ej. cmendoza").strip().lower()
-                        u_rol = st.selectbox(
+                        u_rol = _select_pills(
                             "Rol operativo:*",
-                            options=list(roles_disponibles.keys()),
-                            format_func=lambda k: roles_disponibles[k],
+                            roles_disponibles,
+                            key="pill_alta_usr_rol",
+                            default_key="jefe_cocina",
                         )
-                        u_local = st.selectbox(
+                        u_local_cod = _select_pills(
                             "Local asignado:*",
-                            options=list(opciones_locales_usr.keys()),
-                            format_func=lambda k: opciones_locales_usr[k],
+                            opciones_locales_usr,
+                            key="pill_alta_usr_local",
+                            default_key=0,
                         )
+                        u_local = None if u_local_cod == 0 else int(u_local_cod)
                         u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value="1234", max_chars=4, help="PIN numérico para pantalla táctil en cocina").strip()
                         u_act = st.checkbox("Usuario Activo", value=True)
 
-                        btn_crear_usr = st.form_submit_button("💾 Guardar Personal", type="primary", use_container_width=True)
+                        btn_crear_usr = st.form_submit_button("💾 Guardar Personal", type="primary", width="stretch")
 
                     if btn_crear_usr:
                         if not u_nom.strip() or not u_uname.strip():
@@ -5073,29 +5121,31 @@ elif nav_tab == "maestros":
                         )
 
                         fila_u = todos_usr_df[todos_usr_df["id_usuario"] == usr_sel_id].iloc[0]
+                        cambio_usr = st.session_state.get("last_edit_usr_id") != int(usr_sel_id)
+                        st.session_state["last_edit_usr_id"] = int(usr_sel_id)
+                        loc_actual_cod = int(fila_u["id_local"]) if pd.notna(fila_u["id_local"]) else 0
 
                         with st.form("form_edit_usuario"):
                             e_u_nom = st.text_input("Nombre y Apellido:*", value=str(fila_u["nombre"]))
-                            rol_idx = list(roles_disponibles.keys()).index(fila_u["rol"]) if fila_u["rol"] in roles_disponibles else 0
-                            e_u_rol = st.selectbox(
+                            e_u_rol = _select_pills(
                                 "Rol operativo:*",
-                                options=list(roles_disponibles.keys()),
-                                index=rol_idx,
-                                format_func=lambda k: roles_disponibles[k],
+                                roles_disponibles,
+                                key="pill_edit_usr_rol",
+                                default_key="jefe_cocina",
+                                force_key=fila_u["rol"] if (cambio_usr and fila_u["rol"] in roles_disponibles) else None,
                             )
-                            loc_actual = int(fila_u["id_local"]) if pd.notna(fila_u["id_local"]) else None
-                            loc_keys = list(opciones_locales_usr.keys())
-                            loc_idx = loc_keys.index(loc_actual) if loc_actual in loc_keys else 0
-                            e_u_loc = st.selectbox(
+                            e_u_loc_cod = _select_pills(
                                 "Local asignado:*",
-                                options=loc_keys,
-                                index=loc_idx,
-                                format_func=lambda k: opciones_locales_usr[k],
+                                opciones_locales_usr,
+                                key="pill_edit_usr_local",
+                                default_key=0,
+                                force_key=loc_actual_cod if (cambio_usr and loc_actual_cod in opciones_locales_usr) else None,
                             )
+                            e_u_loc = None if e_u_loc_cod == 0 else int(e_u_loc_cod)
                             e_u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value=str(fila_u["pin"] or "1234"), max_chars=4).strip()
                             e_u_act = st.checkbox("Usuario Activo", value=bool(fila_u["activo"]))
 
-                            btn_mod_usr = st.form_submit_button("🔄 Actualizar Datos", type="primary", use_container_width=True)
+                            btn_mod_usr = st.form_submit_button("🔄 Actualizar Datos", type="primary", width="stretch")
 
                         if btn_mod_usr:
                             if not e_u_nom.strip():

@@ -1794,41 +1794,36 @@ def consumir_produccion_recetas(
                 }
             requerimientos[id_prod]["total_kg"] += kg_necesarios
 
-    # 2. Transacción de validación, descuento FEFO y registro
+    if not requerimientos:
+        raise ValueError("Las recetas seleccionadas no contienen ingredientes activos para descontar.")
+
+    # 2. Transacción de validación, descuento FEFO y registro vectorizado
     with engine.begin() as conn:
-        # A. Validar stock disponible para todos los insumos involucrados
-        lotes_por_producto: Dict[int, list[Dict[str, Any]]] = {}
+        # A. Bloquear y traer en un solo viaje todos los lotes FEFO de los productos requeridos
+        producto_ids = sorted(requerimientos.keys())
+        q_lotes = text(
+            """
+            SELECT
+                s.id_stock,
+                s.id_lote,
+                s.cantidad,
+                l.codigo_lote_proveedor,
+                l.fecha_vencimiento,
+                COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+                dc.id_producto
+            FROM stock_lote_local AS s
+            JOIN lotes AS l ON l.id_lote = s.id_lote
+            JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+            WHERE s.id_local = :id_local AND dc.id_producto = ANY(:producto_ids) AND s.cantidad > 0
+            ORDER BY dc.id_producto ASC, l.fecha_vencimiento ASC, l.fecha_recepcion ASC, l.id_lote ASC
+            FOR UPDATE OF s
+            """
+        )
+        rows = conn.execute(q_lotes, {"id_local": id_local, "producto_ids": producto_ids}).fetchall()
 
-        for id_prod, data_req in requerimientos.items():
-            req_kg = data_req["total_kg"]
-            q_lotes = text(
-                """
-                SELECT
-                    s.id_stock,
-                    s.id_lote,
-                    s.cantidad,
-                    l.codigo_lote_proveedor,
-                    l.fecha_vencimiento,
-                    COALESCE(dc.costo_unitario, 0) AS costo_unitario
-                FROM stock_lote_local AS s
-                JOIN lotes AS l ON l.id_lote = s.id_lote
-                JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
-                WHERE s.id_local = :id_local AND dc.id_producto = :id_producto AND s.cantidad > 0
-                ORDER BY l.fecha_vencimiento ASC, l.fecha_recepcion ASC, l.id_lote ASC
-                FOR UPDATE OF s
-                """
-            )
-            rows = conn.execute(q_lotes, {"id_local": id_local, "id_producto": id_prod}).fetchall()
-            stock_total_disp = sum(float(r[2]) for r in rows)
-
-            if stock_total_disp < req_kg:
-                raise ValueError(
-                    f"Stock insuficiente de {data_req['nombre']}. "
-                    f"Requerido para la producción: {req_kg:.3f} {data_req['unidad']}, "
-                    f"disponible en este local: {stock_total_disp:.3f} {data_req['unidad']}."
-                )
-
-            lotes_por_producto[id_prod] = [
+        lotes_por_producto: Dict[int, list[Dict[str, Any]]] = {pid: [] for pid in producto_ids}
+        for r in rows:
+            lotes_por_producto[int(r[6])].append(
                 {
                     "id_stock": r[0],
                     "id_lote": r[1],
@@ -1837,8 +1832,17 @@ def consumir_produccion_recetas(
                     "fecha_vencimiento": r[4],
                     "costo_unitario": float(r[5]),
                 }
-                for r in rows
-            ]
+            )
+
+        for id_prod, data_req in requerimientos.items():
+            req_kg = data_req["total_kg"]
+            stock_total_disp = sum(l["cantidad_disponible"] for l in lotes_por_producto[id_prod])
+            if stock_total_disp < req_kg:
+                raise ValueError(
+                    f"Stock insuficiente de {data_req['nombre']}. "
+                    f"Requerido para la producción: {req_kg:.3f} {data_req['unidad']}, "
+                    f"disponible en este local: {stock_total_disp:.3f} {data_req['unidad']}."
+                )
 
         # B. Registrar el movimiento maestro de cocina
         resumen_platos_str = ", ".join(f"{item['cantidad_platos']} {item['receta']}" for item in detalle_platos_producidos)
@@ -1867,15 +1871,18 @@ def consumir_produccion_recetas(
             },
         ).scalar_one()
 
-        # C. Descontar stock por FEFO y registrar detalle_movimiento
+        # C. Calcular descuentos FEFO en memoria y ejecutar UPDATE + INSERT por lote en bloque
         costo_total_insumos = 0.0
         desglose_lotes_consumidos: list[Dict[str, Any]] = []
+        upd_stock_ids: list[int] = []
+        upd_nuevos_saldos: list[float] = []
+        det_lote_ids: list[int] = []
+        det_cantidades: list[float] = []
+        det_obs: list[str] = []
 
         for id_prod, data_req in requerimientos.items():
             kg_por_descontar = data_req["total_kg"]
-            lista_lotes = lotes_por_producto[id_prod]
-
-            for lote_info in lista_lotes:
+            for lote_info in lotes_por_producto[id_prod]:
                 if kg_por_descontar <= 0:
                     break
 
@@ -1884,33 +1891,11 @@ def consumir_produccion_recetas(
                 costo_consumo = cant_a_descontar * lote_info["costo_unitario"]
                 costo_total_insumos += costo_consumo
 
-                # Actualizar stock
-                conn.execute(
-                    text(
-                        """
-                        UPDATE stock_lote_local
-                        SET cantidad = :nuevo_stock, actualizado_en = CURRENT_TIMESTAMP
-                        WHERE id_stock = :id_stock
-                        """
-                    ),
-                    {"nuevo_stock": nuevo_stock_lote, "id_stock": lote_info["id_stock"]},
-                )
-
-                # Insertar detalle_movimiento
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
-                        VALUES (:id_movimiento, :id_lote, :cantidad, :obs)
-                        """
-                    ),
-                    {
-                        "id_movimiento": id_movimiento,
-                        "id_lote": lote_info["id_lote"],
-                        "cantidad": cant_a_descontar,
-                        "obs": f"Producción {data_req['nombre']} ({turno})",
-                    },
-                )
+                upd_stock_ids.append(int(lote_info["id_stock"]))
+                upd_nuevos_saldos.append(float(nuevo_stock_lote))
+                det_lote_ids.append(int(lote_info["id_lote"]))
+                det_cantidades.append(float(cant_a_descontar))
+                det_obs.append(f"Producción {data_req['nombre']} ({turno})")
 
                 desglose_lotes_consumidos.append({
                     "id_lote": lote_info["id_lote"],
@@ -1924,6 +1909,38 @@ def consumir_produccion_recetas(
                 })
 
                 kg_por_descontar -= cant_a_descontar
+
+        if upd_stock_ids:
+            conn.execute(
+                text(
+                    """
+                    UPDATE stock_lote_local AS s
+                    SET cantidad = v.nuevo_stock, actualizado_en = CURRENT_TIMESTAMP
+                    FROM UNNEST(CAST(:stock_ids AS INTEGER[]), CAST(:nuevos_saldos AS NUMERIC[])) AS v(id_stock, nuevo_stock)
+                    WHERE s.id_stock = v.id_stock
+                    """
+                ),
+                {"stock_ids": upd_stock_ids, "nuevos_saldos": upd_nuevos_saldos},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO detalle_movimiento (id_movimiento, id_lote, cantidad, observaciones)
+                    SELECT :id_movimiento, v.id_lote, v.cantidad, v.obs
+                    FROM UNNEST(
+                        CAST(:lote_ids AS INTEGER[]),
+                        CAST(:cantidades AS NUMERIC[]),
+                        CAST(:obs AS TEXT[])
+                    ) AS v(id_lote, cantidad, obs)
+                    """
+                ),
+                {
+                    "id_movimiento": id_movimiento,
+                    "lote_ids": det_lote_ids,
+                    "cantidades": det_cantidades,
+                    "obs": det_obs,
+                },
+            )
 
         margen_bruto = venta_total - costo_total_insumos
         pct_margen = (margen_bruto / venta_total * 100) if venta_total > 0 else 0.0
