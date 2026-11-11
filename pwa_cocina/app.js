@@ -666,13 +666,12 @@ const app = {
 
     if (selChef) {
       selChef.innerHTML = opcionesHtml;
-      if (!state.idChefActivo) {
+      const existeChef = state.usuariosList.some(u => u.id_usuario === state.idChefActivo);
+      if (!state.idChefActivo || !existeChef) {
         const jefe = state.usuariosList.find(u => u.rol === 'jefe_cocina') || state.usuariosList[0];
         state.idChefActivo = jefe.id_usuario;
-        selChef.value = state.idChefActivo;
-      } else {
-        selChef.value = state.idChefActivo;
       }
+      selChef.value = state.idChefActivo;
     }
 
     if (selRec) selRec.innerHTML = opcionesHtml;
@@ -1022,6 +1021,7 @@ const app = {
 
   cambiarLocal(nuevoId) {
     state.idLocal = parseInt(nuevoId, 10);
+    state.idChefActivo = null;
     this.limpiarComanda();
     this.cargarBootstrap(state.idLocal);
   },
