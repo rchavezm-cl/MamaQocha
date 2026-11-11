@@ -24,6 +24,17 @@ import reportes_pdf
 # CACHÉ EN MEMORIA DE CONSULTAS A NEON POSTGRESQL Y SELECTOR EN PASTILLAS
 # ==============================================================================
 @st.cache_data(ttl=300, show_spinner=False)
+def _c_catalogo_base() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Precarga en paralelo los 4 catálogos maestros activos en un único bloque paralelo."""
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fut_loc = pool.submit(db.load_locales)
+        fut_prov = pool.submit(db.load_proveedores, True)
+        fut_prod = pool.submit(db.load_productos, True)
+        fut_usr = pool.submit(db.load_usuarios, None, True)
+        return fut_loc.result(), fut_prov.result(), fut_prod.result(), fut_usr.result()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _c_locales() -> pd.DataFrame:
     return db.load_locales()
 
@@ -54,13 +65,26 @@ def _c_recetas_catalogo(solo_activas: bool = True) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _c_resumen_metricas(id_local: Optional[int] = None) -> dict:
-    return db.load_resumen_metricas(id_local=id_local)
+def _c_inventario_consolidado() -> pd.DataFrame:
+    """Única consulta de inventario activo consolidado; las vistas por local y KPIs se derivan en memoria."""
+    return db.load_inventario_alertas(id_local=None)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
 def _c_inventario_alertas(id_local: Optional[int] = None) -> pd.DataFrame:
-    return db.load_inventario_alertas(id_local=id_local)
+    df_all = _c_inventario_consolidado()
+    if id_local is None or df_all.empty:
+        return df_all
+    return df_all[df_all["id_local"] == int(id_local)].reset_index(drop=True)
+
+
+def _c_resumen_metricas(id_local: Optional[int] = None) -> dict:
+    return db.calcular_resumen_metricas_df(_c_inventario_alertas(id_local=id_local))
+
+
+@st.cache_data(show_spinner=False)
+def _c_manual_pdf_bytes(path: str) -> bytes:
+    with open(path, "rb") as f_pdf:
+        return f_pdf.read()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -594,7 +618,7 @@ def _render_manifiesto_traslados_fragment(
                         "id_principal": id_prim,
                         "id_retorno": id_sec,
                     }
-                    st.cache_data.clear()
+                    _invalidar_cache_operativo()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al emitir el manifiesto consolidado de despacho: {e}")
@@ -893,7 +917,7 @@ def _render_acta_merma_fragment(
                     st.session_state["carro_merma_items"] = []
                     st.session_state["voucher_merma_consolidado"] = res_mc
                     st.session_state["ultimo_pdf_merma"] = {"id_movimiento": res_mc["id_movimiento"]}
-                    st.cache_data.clear()
+                    _invalidar_cache_operativo()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al procesar la baja consolidada por merma: {e}")
@@ -1026,6 +1050,45 @@ def _select_pills(
     return st.session_state[val_key]
 
 
+def _invalidar_cache_operativo() -> None:
+    """Limpia solo cachés transaccionales/stock tras una operación, preservando catálogos maestros."""
+    for fn in (
+        _c_inventario_consolidado,
+        _c_stock_disponible_local,
+        _c_top_riesgo_traslado,
+        _c_historial_movimientos,
+        _c_datos_traslado_bilateral,
+        _c_resumen_mermas,
+        _c_estadisticas_mermas_causa,
+        _c_historial_mermas,
+        _c_datos_mermas,
+        _c_lotes_selector,
+        _c_trazabilidad_lote,
+        _c_cola_eventos_sync,
+        _c_listado_documentos_movimiento,
+        _c_listado_recepciones,
+        _c_reporte_consolidado_movimientos,
+        _c_reporte_consolidado_recepciones,
+        _c_movimiento_pdf,
+        _c_recepcion_pdf,
+    ):
+        fn.clear()
+
+
+def _invalidar_cache_maestros() -> None:
+    """Limpia solo catálogos maestros tras crear o modificar proveedores, productos o personal."""
+    for fn in (
+        _c_catalogo_base,
+        _c_locales,
+        _c_proveedores,
+        _c_productos,
+        _c_usuarios,
+        _c_recetas,
+        _c_recetas_catalogo,
+    ):
+        fn.clear()
+
+
 def _render_quick_pdf_banner(
     session_key: str,
     label: str,
@@ -1033,23 +1096,21 @@ def _render_quick_pdf_banner(
     filename_fn,
     btn_key: str,
 ):
-    """Muestra un botón persistente de descarga PDF para el último documento emitido en la pestaña."""
+    """Muestra un botón persistente de descarga PDF con generación perezosa al hacer clic."""
     doc_info = st.session_state.get(session_key)
     if not doc_info:
         return
     try:
-        pdf_bytes = build_pdf_fn(doc_info)
-        if not pdf_bytes:
-            return
         col_pdf_btn, col_pdf_close = st.columns([4, 1])
         with col_pdf_btn:
             st.download_button(
                 label=label,
-                data=pdf_bytes,
+                data=lambda _fn=build_pdf_fn, _doc=doc_info: _fn(_doc),
                 file_name=filename_fn(doc_info),
                 mime="application/pdf",
                 width="stretch",
                 key=btn_key,
+                on_click="ignore",
             )
         with col_pdf_close:
             if st.button("✖️ Ocultar", key=f"{btn_key}_dismiss", width="stretch"):
@@ -1878,12 +1939,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Carga de datos base con caché (evita viajes repetidos a Neon en cada clic)
+# Carga de datos base en paralelo con caché (evita viajes secuenciales a Neon en cada clic)
 try:
-    locales_df = _c_locales()
-    proveedores_df = _c_proveedores(solo_activos=True)
-    productos_df = _c_productos(solo_activos=True)
-    usuarios_df = _c_usuarios(solo_activos=True)
+    locales_df, proveedores_df, productos_df, usuarios_df = _c_catalogo_base()
 except SQLAlchemyError as err:
     st.error(
         f"❌ Error al conectar con PostgreSQL: {err}. "
@@ -2006,14 +2064,14 @@ st.sidebar.markdown("---")
 
 manual_pdf_path = os.path.join(os.path.dirname(__file__), "Manual_de_Usuario_MamaQocha.pdf")
 if os.path.exists(manual_pdf_path):
-    with open(manual_pdf_path, "rb") as f_pdf:
-        st.sidebar.download_button(
-            label="📄 Descargar Manual (PDF)",
-            data=f_pdf.read(),
-            file_name="Manual_de_Usuario_MamaQocha.pdf",
-            mime="application/pdf",
-            width="stretch",
-        )
+    st.sidebar.download_button(
+        label="📄 Descargar Manual (PDF)",
+        data=lambda _p=manual_pdf_path: _c_manual_pdf_bytes(_p),
+        file_name="Manual_de_Usuario_MamaQocha.pdf",
+        mime="application/pdf",
+        width="stretch",
+        on_click="ignore",
+    )
 
 st.sidebar.caption("Proyecto Académico Demo Funcional")
 
@@ -3125,7 +3183,7 @@ elif nav_tab == "recepcion":
                     "responsable": opc_usr_rec.get(id_usr_receptor, "Operador Central") if id_usr_receptor else "Operador Central",
                 }
                 st.session_state["ultimo_pdf_recepcion"] = {"id_compra": resultado["id_compra"]}
-                st.cache_data.clear()
+                _invalidar_cache_operativo()
                 st.rerun()
             except SQLAlchemyError as err:
                 st.error(f"Error en la base de datos: {err}")
@@ -3249,10 +3307,16 @@ elif nav_tab == "cocina":
             btn_key="btn_pdf_quick_produccion",
         )
 
-        recetas_raw_df = _c_recetas(solo_activas=True)
-        if recetas_raw_df.empty:
-            st.warning("⚠️ No hay recetas activas configuradas en la base de datos.")
-        else:
+        @st.fragment
+        def _render_cocina_recetas_fragment(
+            local_id: int,
+            usr_sesion_id: Optional[int],
+        ) -> None:
+            recetas_raw_df = _c_recetas(solo_activas=True)
+            if recetas_raw_df.empty:
+                st.warning("⚠️ No hay recetas activas configuradas en la base de datos.")
+                return
+
             recetas_catalogo = (
                 recetas_raw_df[["id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min"]]
                 .drop_duplicates()
@@ -3274,7 +3338,7 @@ elif nav_tab == "cocina":
                     default_key="Almuerzo (12:00 - 16:00)",
                 )
             with col_cf2:
-                opc_chef_prod, idx_chef_prod = get_opciones_usuarios(int(local_cocina_id), id_usuario_sesion)
+                opc_chef_prod, idx_chef_prod = get_opciones_usuarios(int(local_id), usr_sesion_id)
                 id_chef_prod = st.selectbox(
                     "Chef / Responsable:*",
                     options=list(opc_chef_prod.keys()) if opc_chef_prod else [None],
@@ -3304,106 +3368,109 @@ elif nav_tab == "cocina":
 
             if not recetas_seleccionadas:
                 st.info("Selecciona al menos una receta para configurar las porciones del turno.")
-            else:
-                st.markdown("##### 🔢 Cantidad de Porciones por Plato")
-                orden_platos = {}
-                cols_porciones = st.columns(min(len(recetas_seleccionadas), 4))
-                for idx, r_id in enumerate(recetas_seleccionadas):
-                    col_act = cols_porciones[idx % len(cols_porciones)]
-                    nom_r = recetas_catalogo.loc[recetas_catalogo["id_receta"] == r_id, "receta"].values[0]
-                    with col_act:
-                        cant = st.number_input(
-                            f"{nom_r}:",
-                            min_value=1,
-                            max_value=200,
-                            value=5,
-                            step=1,
-                            key=f"cant_receta_input_{r_id}",
-                        )
-                        orden_platos[r_id] = cant
+                return
 
-                # Cálculo de requerimientos y stock disponible
-                stock_local_df = _c_stock_disponible_local(int(local_cocina_id))
-                stock_por_prod = (
-                    stock_local_df.groupby("id_producto")["stock_disponible"].sum().to_dict()
-                    if not stock_local_df.empty
-                    else {}
-                )
+            st.markdown("##### 🔢 Cantidad de Porciones por Plato")
+            orden_platos = {}
+            cols_porciones = st.columns(min(len(recetas_seleccionadas), 4))
+            for idx, r_id in enumerate(recetas_seleccionadas):
+                col_act = cols_porciones[idx % len(cols_porciones)]
+                nom_r = recetas_catalogo.loc[recetas_catalogo["id_receta"] == r_id, "receta"].values[0]
+                with col_act:
+                    cant = st.number_input(
+                        f"{nom_r}:",
+                        min_value=1,
+                        max_value=200,
+                        value=5,
+                        step=1,
+                        key=f"cant_receta_input_{r_id}",
+                    )
+                    orden_platos[r_id] = cant
 
-                req_totales = {}
-                venta_estimada = 0
-                for r_id, cant in orden_platos.items():
-                    sub_df = recetas_raw_df[recetas_raw_df["id_receta"] == r_id]
-                    p_vta = float(sub_df.iloc[0]["precio_venta"])
-                    venta_estimada += p_vta * cant
+            # Cálculo de requerimientos y stock disponible
+            stock_local_df = _c_stock_disponible_local(int(local_id))
+            stock_por_prod = (
+                stock_local_df.groupby("id_producto")["stock_disponible"].sum().to_dict()
+                if not stock_local_df.empty
+                else {}
+            )
 
-                    for _, ing in sub_df.iterrows():
-                        p_id = int(ing["id_producto"])
-                        kg_req = float(ing["cantidad_kg"]) * cant
-                        if p_id not in req_totales:
-                            req_totales[p_id] = {
-                                "nombre": ing["ingrediente"],
-                                "unidad": ing["unidad_medida"],
-                                "total_req": 0.0,
-                            }
-                        req_totales[p_id]["total_req"] += kg_req
+            req_totales = {}
+            venta_estimada = 0
+            for r_id, cant in orden_platos.items():
+                sub_df = recetas_raw_df[recetas_raw_df["id_receta"] == r_id]
+                p_vta = float(sub_df.iloc[0]["precio_venta"])
+                venta_estimada += p_vta * cant
 
-                st.markdown("##### 📊 Simulación de Consumo vs Stock Disponible en Sucursal")
-                filas_simulacion = []
-                hay_faltante = False
+                for _, ing in sub_df.iterrows():
+                    p_id = int(ing["id_producto"])
+                    kg_req = float(ing["cantidad_kg"]) * cant
+                    if p_id not in req_totales:
+                        req_totales[p_id] = {
+                            "nombre": ing["ingrediente"],
+                            "unidad": ing["unidad_medida"],
+                            "total_req": 0.0,
+                        }
+                    req_totales[p_id]["total_req"] += kg_req
 
-                for p_id, datos in req_totales.items():
-                    disp = float(stock_por_prod.get(p_id, 0.0))
-                    req = datos["total_req"]
-                    estado_str = "✅ Suficiente" if disp >= req else f"❌ Faltan {(req - disp):.3f} {datos['unidad']}"
-                    if disp < req:
-                        hay_faltante = True
+            st.markdown("##### 📊 Simulación de Consumo vs Stock Disponible en Sucursal")
+            filas_simulacion = []
+            hay_faltante = False
 
-                    filas_simulacion.append({
-                        "Insumo": datos["nombre"],
-                        "Requerido (Comanda)": f"{req:.3f} {datos['unidad']}",
-                        "Stock en Local": f"{disp:.3f} {datos['unidad']}",
-                        "Saldo Proyectado": f"{(disp - req):.3f} {datos['unidad']}",
-                        "Factibilidad": estado_str,
-                    })
+            for p_id, datos in req_totales.items():
+                disp = float(stock_por_prod.get(p_id, 0.0))
+                req = datos["total_req"]
+                estado_str = "✅ Suficiente" if disp >= req else f"❌ Faltan {(req - disp):.3f} {datos['unidad']}"
+                if disp < req:
+                    hay_faltante = True
 
-                simulacion_df = pd.DataFrame(filas_simulacion)
-                st.dataframe(simulacion_df, width="stretch", hide_index=True)
+                filas_simulacion.append({
+                    "Insumo": datos["nombre"],
+                    "Requerido (Comanda)": f"{req:.3f} {datos['unidad']}",
+                    "Stock en Local": f"{disp:.3f} {datos['unidad']}",
+                    "Saldo Proyectado": f"{(disp - req):.3f} {datos['unidad']}",
+                    "Factibilidad": estado_str,
+                })
 
-                col_res1, col_res2, col_res3 = st.columns([1, 1, 1.5])
-                col_res1.metric("Total Platos a Elaborar", f"{sum(orden_platos.values())} u.")
-                col_res2.metric("Venta Bruta Proyectada", f"${venta_estimada:,.0f} CLP")
+            simulacion_df = pd.DataFrame(filas_simulacion)
+            st.dataframe(simulacion_df, width="stretch", hide_index=True)
 
-                with col_res3:
-                    if hay_faltante:
-                        st.error("⚠️ Stock insuficiente en esta sucursal para completar la comanda. Ajuste las cantidades o solicite un traspaso desde otra sucursal.")
-                    else:
-                        st.success("✨ ¡Stock suficiente! Todos los insumos se descontarán automáticamente bajo FEFO.")
+            col_res1, col_res2, col_res3 = st.columns([1, 1, 1.5])
+            col_res1.metric("Total Platos a Elaborar", f"{sum(orden_platos.values())} u.")
+            col_res2.metric("Venta Bruta Proyectada", f"${venta_estimada:,.0f} CLP")
 
-                btn_confirmar_recetas = st.button(
-                    "🍳 Confirmar y Descontar Producción por FEFO",
-                    type="primary",
-                    disabled=hay_faltante,
-                    width="stretch",
-                    key="btn_exec_produccion_recetas",
-                )
+            with col_res3:
+                if hay_faltante:
+                    st.error("⚠️ Stock insuficiente en esta sucursal para completar la comanda. Ajuste las cantidades o solicite un traspaso desde otra sucursal.")
+                else:
+                    st.success("✨ ¡Stock suficiente! Todos los insumos se descontarán automáticamente bajo FEFO.")
 
-                if btn_confirmar_recetas:
-                    try:
-                        res_prod = db.consumir_produccion_recetas(
-                            id_local=int(local_cocina_id),
-                            orden_platos=orden_platos,
-                            turno=turno_prod,
-                            observaciones=obs_prod.strip() or f"Producción comanda {turno_prod}",
-                            id_usuario=int(id_chef_prod) if id_chef_prod is not None else None,
-                        )
-                        res_prod["responsable"] = opc_chef_prod.get(id_chef_prod, "Operador Central") if id_chef_prod else "Operador Central"
-                        st.session_state["voucher_produccion"] = res_prod
-                        st.session_state["ultimo_pdf_produccion"] = {"id_movimiento": res_prod["id_movimiento"]}
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Error al registrar producción: {err}")
+            btn_confirmar_recetas = st.button(
+                "🍳 Confirmar y Descontar Producción por FEFO",
+                type="primary",
+                disabled=hay_faltante,
+                width="stretch",
+                key="btn_exec_produccion_recetas",
+            )
+
+            if btn_confirmar_recetas:
+                try:
+                    res_prod = db.consumir_produccion_recetas(
+                        id_local=int(local_id),
+                        orden_platos=orden_platos,
+                        turno=turno_prod,
+                        observaciones=obs_prod.strip() or f"Producción comanda {turno_prod}",
+                        id_usuario=int(id_chef_prod) if id_chef_prod is not None else None,
+                    )
+                    res_prod["responsable"] = opc_chef_prod.get(id_chef_prod, "Operador Central") if id_chef_prod else "Operador Central"
+                    st.session_state["voucher_produccion"] = res_prod
+                    st.session_state["ultimo_pdf_produccion"] = {"id_movimiento": res_prod["id_movimiento"]}
+                    _invalidar_cache_operativo()
+                    st.rerun()
+                except Exception as err:
+                    st.error(f"Error al registrar producción: {err}")
+
+        _render_cocina_recetas_fragment(int(local_cocina_id), id_usuario_sesion)
 
     # --------------------------------------------------------------------------
     # SUBTAB: SALIDA MANUAL POR LOTE INDIVIDUAL
@@ -3532,7 +3599,7 @@ elif nav_tab == "cocina":
                         "responsable": opc_chef_man.get(id_chef_man, "Operador Central") if id_chef_man else "Operador Central",
                     }
                     st.session_state["ultimo_pdf_cocina_manual"] = {"id_movimiento": res_cocina["id_movimiento"]}
-                    st.cache_data.clear()
+                    _invalidar_cache_operativo()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar salida a cocina: {e}")
@@ -3849,7 +3916,7 @@ elif nav_tab == "traslados":
                         "id_principal": res_tr["id_movimiento"],
                         "id_retorno": None,
                     }
-                    st.cache_data.clear()
+                    _invalidar_cache_operativo()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error al registrar el traslado manual: {e}")
@@ -4166,10 +4233,13 @@ elif nav_tab == "trazabilidad":
     )
 
     if traz_sub == "expediente":
-        lotes_disponibles = _c_lotes_selector()
-        if lotes_disponibles.empty:
-            st.info("No existen lotes registrados en la base de datos.")
-        else:
+        @st.fragment
+        def _render_trazabilidad_expediente_fragment() -> None:
+            lotes_disponibles = _c_lotes_selector()
+            if lotes_disponibles.empty:
+                st.info("No existen lotes registrados en la base de datos.")
+                return
+
             opciones_lotes = {
                 int(row["id_lote"]): row["display_label"]
                 for _, row in lotes_disponibles.iterrows()
@@ -4224,11 +4294,12 @@ elif nav_tab == "trazabilidad":
 
                     st.download_button(
                         label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info['id_lote']} (PDF)",
-                        data=reportes_pdf.generar_pdf_expediente_lote(trazabilidad),
+                        data=lambda _t=trazabilidad: reportes_pdf.generar_pdf_expediente_lote(_t),
                         file_name=f"Expediente_SEREMI_Lote_{info['id_lote']}.pdf",
                         mime="application/pdf",
                         width="stretch",
                         key=f"btn_pdf_exp_lote_{info['id_lote']}",
+                        on_click="ignore",
                     )
 
                     # Timeline Stepper Visual (Línea de Vida del Lote)
@@ -4319,6 +4390,8 @@ elif nav_tab == "trazabilidad":
                                     },
                                 )
 
+        _render_trazabilidad_expediente_fragment()
+
     elif traz_sub == "historial":
         st.markdown("#### 📋 Libro de Movimientos de Inventario (Últimas Operaciones)")
         st.caption("Bitácora cronológica de traslados entre sucursales y despachos para consumo en cocina.")
@@ -4361,59 +4434,67 @@ elif nav_tab == "reportes":
         "temperaturas HACCP, proveedores y manipuladores responsables en cada etapa."
     )
 
-    REP_TIPOS = {
-        "merma": "🗑️ Actas de Merma (Crítico)",
-        "cocina": "🍳 Operaciones Cocina (FEFO)",
-        "traslado": "🚚 Guías de Traslado",
-        "recepcion": "📥 Recepciones (HACCP)",
-        "lote": "📦 Expediente por Lote",
-    }
+    @st.fragment
+    def _render_reportes_fragment(
+        local_activo_id: Optional[int],
+        local_activo_nombre: str,
+    ) -> None:
+        REP_TIPOS = {
+            "merma": "🗑️ Actas de Merma (Crítico)",
+            "cocina": "🍳 Operaciones Cocina (FEFO)",
+            "traslado": "🚚 Guías de Traslado",
+            "recepcion": "📥 Recepciones (HACCP)",
+            "lote": "📦 Expediente por Lote",
+        }
 
-    with st.container(border=True):
-        rep_tipo = _select_pills(
-            "Tipo de Documento / Auditoría SEREMI:",
-            REP_TIPOS,
-            key="rep_sel_tipo_pills",
-            default_key="merma",
-        )
-        col_rf2, col_rf3, col_rf4 = st.columns([2.0, 0.9, 0.9])
-        with col_rf2:
-            if id_local_activo:
-                rep_local_id = id_local_activo
-                rep_local_label = nombre_local_activo
-                st.text_input("Sucursal:", value=nombre_local_activo, disabled=True, key="rep_loc_locked")
-            else:
-                opc_rep_locales = {0: "🌐 Todas"}
-                for _, r_loc in locales_df.iterrows():
-                    opc_rep_locales[int(r_loc["id_local"])] = r_loc["nombre"]
-                sel_rep_loc = _select_pills(
-                    "Sucursal:",
-                    opc_rep_locales,
-                    key="rep_sel_local_pills",
-                    default_key=0,
+        with st.container(border=True):
+            rep_tipo = _select_pills(
+                "Tipo de Documento / Auditoría SEREMI:",
+                REP_TIPOS,
+                key="rep_sel_tipo_pills",
+                default_key="merma",
+            )
+            col_rf2, col_rf3, col_rf4 = st.columns([2.0, 0.9, 0.9])
+            with col_rf2:
+                if local_activo_id:
+                    rep_local_id = local_activo_id
+                    rep_local_label = local_activo_nombre
+                    st.text_input("Sucursal:", value=local_activo_nombre, disabled=True, key="rep_loc_locked")
+                else:
+                    opc_rep_locales = {0: "🌐 Todas"}
+                    for _, r_loc in locales_df.iterrows():
+                        opc_rep_locales[int(r_loc["id_local"])] = r_loc["nombre"]
+                    sel_rep_loc = _select_pills(
+                        "Sucursal:",
+                        opc_rep_locales,
+                        key="rep_sel_local_pills",
+                        default_key=0,
+                    )
+                    rep_local_id = None if sel_rep_loc == 0 else sel_rep_loc
+                    rep_local_label = opc_rep_locales[sel_rep_loc]
+            with col_rf3:
+                rep_desde = st.date_input(
+                    "Desde:",
+                    value=date.today() - timedelta(days=30),
+                    key="rep_fecha_desde",
                 )
-                rep_local_id = None if sel_rep_loc == 0 else sel_rep_loc
-                rep_local_label = opc_rep_locales[sel_rep_loc]
-        with col_rf3:
-            rep_desde = st.date_input(
-                "Desde:",
-                value=date.today() - timedelta(days=30),
-                key="rep_fecha_desde",
-            )
-        with col_rf4:
-            rep_hasta = st.date_input(
-                "Hasta:",
-                value=date.today(),
-                key="rep_fecha_hasta",
-            )
+            with col_rf4:
+                rep_hasta = st.date_input(
+                    "Hasta:",
+                    value=date.today(),
+                    key="rep_fecha_hasta",
+                )
 
-    if rep_desde > rep_hasta:
-        st.error("⚠️ La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
-    elif rep_tipo == "lote":
-        lotes_rep_df = _c_lotes_selector()
-        if lotes_rep_df.empty:
-            st.info("No hay lotes registrados en la base de datos.")
-        else:
+        if rep_desde > rep_hasta:
+            st.error("⚠️ La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
+            return
+
+        if rep_tipo == "lote":
+            lotes_rep_df = _c_lotes_selector()
+            if lotes_rep_df.empty:
+                st.info("No hay lotes registrados en la base de datos.")
+                return
+
             opc_lotes_rep = {
                 int(row["id_lote"]): row["display_label"]
                 for _, row in lotes_rep_df.iterrows()
@@ -4437,12 +4518,13 @@ elif nav_tab == "reportes":
 
                 st.download_button(
                     label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info_l['id_lote']} (PDF)",
-                    data=reportes_pdf.generar_pdf_expediente_lote(traz_rep),
+                    data=lambda _t=traz_rep: reportes_pdf.generar_pdf_expediente_lote(_t),
                     file_name=f"Expediente_SEREMI_Lote_{info_l['id_lote']}.pdf",
                     mime="application/pdf",
                     type="primary",
                     width="stretch",
                     key=f"rep_btn_pdf_lote_{info_l['id_lote']}",
+                    on_click="ignore",
                 )
                 if not movs_l.empty:
                     st.markdown("##### 👥 Manipuladores y Custodia del Lote")
@@ -4450,7 +4532,8 @@ elif nav_tab == "reportes":
                 if not stock_l.empty:
                     st.markdown("##### 📦 Stock Remanente por Sucursal")
                     st.dataframe(stock_l, width="stretch", hide_index=True)
-    else:
+            return
+
         REP_CONFIG = {
             "merma": {
                 "id_col": "id_movimiento",
@@ -4587,108 +4670,112 @@ elif nav_tab == "reportes":
 
         if df_docs.empty:
             st.info("No se encontraron documentos para los filtros y rango de fechas seleccionados.")
-        else:
-            col_rk1, col_rk2, col_rk3, col_rk4 = st.columns([1, 1, 1, 1.6])
-            col_rk1.metric("Documentos / Folios", f"{len(df_docs)}")
-            col_rk2.metric("Total Lotes", f"{int(df_docs['total_lotes'].sum())}")
-            col_rk3.metric("Volumen Total", f"{float(df_docs['total_cantidad'].sum()):,.2f}")
-            with col_rk4:
-                libro_bytes = reportes_pdf.generar_pdf_libro_consolidado(
-                    tipo=rep_tipo,
-                    df=df_consolidado,
-                    sucursal_label=rep_local_label,
-                    fecha_desde=rep_desde,
-                    fecha_hasta=rep_hasta,
-                )
-                st.download_button(
-                    label="📚 Descargar Libro Consolidado del Período (PDF)",
-                    data=libro_bytes,
-                    file_name=f"{cfg['libro_name']}_{rep_desde.strftime('%Y%m%d')}_{rep_hasta.strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf",
-                    width="stretch",
-                    key=f"btn_libro_{rep_tipo}",
-                )
+            return
 
-            st.dataframe(
-                df_docs[cfg["cols"]],
+        col_rk1, col_rk2, col_rk3, col_rk4 = st.columns([1, 1, 1, 1.6])
+        col_rk1.metric("Documentos / Folios", f"{len(df_docs)}")
+        col_rk2.metric("Total Lotes", f"{int(df_docs['total_lotes'].sum())}")
+        col_rk3.metric("Volumen Total", f"{float(df_docs['total_cantidad'].sum()):,.2f}")
+        with col_rk4:
+            st.download_button(
+                label="📚 Descargar Libro Consolidado del Período (PDF)",
+                data=lambda _t=rep_tipo, _df=df_consolidado, _loc=rep_local_label, _d=rep_desde, _h=rep_hasta: reportes_pdf.generar_pdf_libro_consolidado(
+                    tipo=_t,
+                    df=_df,
+                    sucursal_label=_loc,
+                    fecha_desde=_d,
+                    fecha_hasta=_h,
+                ),
+                file_name=f"{cfg['libro_name']}_{rep_desde.strftime('%Y%m%d')}_{rep_hasta.strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
                 width="stretch",
-                hide_index=True,
-                column_config=cfg["col_cfg"],
+                key=f"btn_libro_{rep_tipo}",
+                on_click="ignore",
             )
 
-            st.markdown("---")
-            st.markdown("#### 📄 Emisión y Vista Previa de Documento Individual (PDF)")
+        st.dataframe(
+            df_docs[cfg["cols"]],
+            width="stretch",
+            hide_index=True,
+            column_config=cfg["col_cfg"],
+        )
 
-            id_col = cfg["id_col"]
-            opc_folios = {}
-            for _, r_doc in df_docs.iterrows():
-                fid = int(r_doc[id_col])
-                if rep_tipo == "recepcion":
-                    etiq = (
-                        f"{cfg['folio_pref']} #{fid} | {r_doc['fecha_recepcion']} | "
-                        f"{r_doc['tipo_documento']} {r_doc['numero_documento']} | "
-                        f"{r_doc['proveedor']} | Recibió: {r_doc['recibido_por']}"
-                    )
-                elif rep_tipo == "traslado":
-                    etiq = (
-                        f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
-                        f"{r_doc['local_origen']} ➡️ {r_doc['local_destino']} | "
-                        f"Despachó: {r_doc['responsable']} / Recibió: {r_doc['receptor']}"
-                    )
-                else:
-                    etiq = (
-                        f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
-                        f"{r_doc['local_origen']} | Resp.: {r_doc['responsable']} | {r_doc['referencia']}"
-                    )
-                opc_folios[fid] = etiq
+        st.markdown("---")
+        st.markdown("#### 📄 Emisión y Vista Previa de Documento Individual (PDF)")
 
-            col_sel_doc, col_btn_doc = st.columns([2.5, 1.2])
-            with col_sel_doc:
-                folio_sel = st.selectbox(
-                    "Selecciona el folio a imprimir en PDF:",
-                    options=list(opc_folios.keys()),
-                    format_func=lambda k: opc_folios[k],
-                    key=f"rep_sel_folio_{rep_tipo}",
+        id_col = cfg["id_col"]
+        opc_folios = {}
+        for _, r_doc in df_docs.iterrows():
+            fid = int(r_doc[id_col])
+            if rep_tipo == "recepcion":
+                etiq = (
+                    f"{cfg['folio_pref']} #{fid} | {r_doc['fecha_recepcion']} | "
+                    f"{r_doc['tipo_documento']} {r_doc['numero_documento']} | "
+                    f"{r_doc['proveedor']} | Recibió: {r_doc['recibido_por']}"
+                )
+            elif rep_tipo == "traslado":
+                etiq = (
+                    f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
+                    f"{r_doc['local_origen']} ➡️ {r_doc['local_destino']} | "
+                    f"Despachó: {r_doc['responsable']} / Recibió: {r_doc['receptor']}"
+                )
+            else:
+                etiq = (
+                    f"{cfg['folio_pref']} #{fid} | {pd.to_datetime(r_doc['fecha_movimiento']).strftime('%d-%m-%Y %H:%M')} | "
+                    f"{r_doc['local_origen']} | Resp.: {r_doc['responsable']} | {r_doc['referencia']}"
+                )
+            opc_folios[fid] = etiq
+
+        col_sel_doc, col_btn_doc = st.columns([2.5, 1.2])
+        with col_sel_doc:
+            folio_sel = st.selectbox(
+                "Selecciona el folio a imprimir en PDF:",
+                options=list(opc_folios.keys()),
+                format_func=lambda k: opc_folios[k],
+                key=f"rep_sel_folio_{rep_tipo}",
+            )
+
+        doc_data = cfg["detail_fn"](folio_sel)
+        if doc_data:
+            with col_btn_doc:
+                st.write("")
+                st.write("")
+                st.download_button(
+                    label=f"🖨️ Imprimir {cfg['folio_pref']} #{folio_sel} (PDF)",
+                    data=lambda _fn=cfg["pdf_fn"], _d=doc_data: _fn(_d),
+                    file_name=f"{cfg['file_pref']}_{folio_sel}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    width="stretch",
+                    key=f"btn_print_ind_{rep_tipo}_{folio_sel}",
+                    on_click="ignore",
                 )
 
-            doc_data = cfg["detail_fn"](folio_sel)
-            if doc_data:
-                with col_btn_doc:
-                    st.write("")
-                    st.write("")
-                    st.download_button(
-                        label=f"🖨️ Imprimir {cfg['folio_pref']} #{folio_sel} (PDF)",
-                        data=cfg["pdf_fn"](doc_data),
-                        file_name=f"{cfg['file_pref']}_{folio_sel}.pdf",
-                        mime="application/pdf",
-                        type="primary",
-                        width="stretch",
-                        key=f"btn_print_ind_{rep_tipo}_{folio_sel}",
+            cab_p = doc_data["cabecera"]
+            items_p = doc_data["items"]
+            with st.expander(f"👁️ Vista previa de trazabilidad — {cfg['folio_pref']} #{folio_sel}", expanded=True):
+                if rep_tipo == "recepcion":
+                    st.markdown(
+                        f"**Proveedor:** {cab_p['proveedor']} (`{cab_p['rut_proveedor']}`) | "
+                        f"**Doc:** {cab_p['tipo_documento']} `{cab_p['numero_documento']}` | "
+                        f"**Recepcionado por:** `{cab_p['recibido_por']}` ({cab_p['rol_receptor']})"
                     )
+                elif rep_tipo == "traslado":
+                    st.markdown(
+                        f"**Ruta:** {cab_p['local_origen']} ➡️ {cab_p['local_destino']} | "
+                        f"**Despachó:** `{cab_p['responsable_origen']}` | **Recibió:** `{cab_p['responsable_destino']}`"
+                    )
+                else:
+                    st.markdown(
+                        f"**Sucursal:** {cab_p['local_origen']} | "
+                        f"**Manipulador / Responsable:** `{cab_p['responsable_origen']}` ({cab_p['rol_origen']}) | "
+                        f"**Referencia:** `{cab_p['referencia']}`"
+                    )
+                if cab_p.get("observaciones"):
+                    st.caption(f"Observaciones: {cab_p['observaciones']}")
+                st.dataframe(items_p, width="stretch", hide_index=True)
 
-                cab_p = doc_data["cabecera"]
-                items_p = doc_data["items"]
-                with st.expander(f"👁️ Vista previa de trazabilidad — {cfg['folio_pref']} #{folio_sel}", expanded=True):
-                    if rep_tipo == "recepcion":
-                        st.markdown(
-                            f"**Proveedor:** {cab_p['proveedor']} (`{cab_p['rut_proveedor']}`) | "
-                            f"**Doc:** {cab_p['tipo_documento']} `{cab_p['numero_documento']}` | "
-                            f"**Recepcionado por:** `{cab_p['recibido_por']}` ({cab_p['rol_receptor']})"
-                        )
-                    elif rep_tipo == "traslado":
-                        st.markdown(
-                            f"**Ruta:** {cab_p['local_origen']} ➡️ {cab_p['local_destino']} | "
-                            f"**Despachó:** `{cab_p['responsable_origen']}` | **Recibió:** `{cab_p['responsable_destino']}`"
-                        )
-                    else:
-                        st.markdown(
-                            f"**Sucursal:** {cab_p['local_origen']} | "
-                            f"**Manipulador / Responsable:** `{cab_p['responsable_origen']}` ({cab_p['rol_origen']}) | "
-                            f"**Referencia:** `{cab_p['referencia']}`"
-                        )
-                    if cab_p.get("observaciones"):
-                        st.caption(f"Observaciones: {cab_p['observaciones']}")
-                    st.dataframe(items_p, width="stretch", hide_index=True)
+    _render_reportes_fragment(id_local_activo, nombre_local_activo)
 
 # ==============================================================================
 # TAB 8: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
@@ -4779,7 +4866,7 @@ elif nav_tab == "maestros":
                                     activo=p_act,
                                 )
                                 st.success(f"✅ Proveedor creado con éxito con ID #{nuevo_id_prov}.")
-                                st.cache_data.clear()
+                                _invalidar_cache_maestros()
                                 st.rerun()
                             except Exception as err:
                                 st.error(f"Error al registrar proveedor: {err}")
@@ -4828,7 +4915,7 @@ elif nav_tab == "maestros":
                                         activo=ed_act,
                                     )
                                     st.success(f"✅ Proveedor #{prov_id_edit} actualizado con éxito.")
-                                    st.cache_data.clear()
+                                    _invalidar_cache_maestros()
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Error al actualizar proveedor: {err}")
@@ -4895,7 +4982,7 @@ elif nav_tab == "maestros":
                                     activo=pr_act,
                                 )
                                 st.success(f"✅ Producto creado con éxito con ID #{nuevo_id_prod}.")
-                                st.cache_data.clear()
+                                _invalidar_cache_maestros()
                                 st.rerun()
                             except Exception as err:
                                 st.error(f"Error al registrar producto: {err}")
@@ -4941,7 +5028,7 @@ elif nav_tab == "maestros":
                                         activo=ed_pr_act,
                                     )
                                     st.success(f"✅ Producto #{prod_id_edit} actualizado con éxito.")
-                                    st.cache_data.clear()
+                                    _invalidar_cache_maestros()
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Error al actualizar producto: {err}")
@@ -5098,7 +5185,7 @@ elif nav_tab == "maestros":
                                     activo=u_act,
                                 )
                                 st.success(f"Personal registrado exitosamente con ID {nuevo_id_usr} (PIN: {u_pin}).")
-                                st.cache_data.clear()
+                                _invalidar_cache_maestros()
                                 st.rerun()
                             except Exception as ex_u:
                                 st.error(f"Error al registrar usuario: {str(ex_u)}")
@@ -5163,7 +5250,7 @@ elif nav_tab == "maestros":
                                         activo=e_u_act,
                                     )
                                     st.success(f"Usuario {e_u_nom} actualizado correctamente.")
-                                    st.cache_data.clear()
+                                    _invalidar_cache_maestros()
                                     st.rerun()
                                 except Exception as ex_mod_u:
                                     st.error(f"Error al actualizar usuario: {str(ex_mod_u)}")

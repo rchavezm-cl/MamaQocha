@@ -29,8 +29,14 @@ if not DATABASE_URL:
 elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+psycopg://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-# Crear el motor de SQLAlchemy con soporte para reconexión automática en Postgres serverless
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+# Crear el motor de SQLAlchemy con pool dimensionado para consultas paralelas y reconexión en Postgres serverless
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=10,
+    max_overflow=10,
+)
 
 
 def load_locales() -> pd.DataFrame:
@@ -371,9 +377,8 @@ def load_inventario_alertas(id_local: Optional[int] = None) -> pd.DataFrame:
         return pd.read_sql(query, connection, params=params)
 
 
-def load_resumen_metricas(id_local: Optional[int] = None) -> Dict[str, Any]:
-    """Obtiene métricas cuantitativas y financieras de stock y alertas para el local o consolidado."""
-    inv = load_inventario_alertas(id_local)
+def calcular_resumen_metricas_df(inv: pd.DataFrame) -> Dict[str, Any]:
+    """Calcula métricas cuantitativas y financieras de stock y alertas desde un DataFrame ya cargado."""
     if inv.empty:
         return {
             "total_lotes": 0,
@@ -416,6 +421,11 @@ def load_resumen_metricas(id_local: Optional[int] = None) -> Dict[str, Any]:
         "optimos": int((inv["severidad_alerta"] == 4).sum()),
         "valor_optimos": valor_optimo,
     }
+
+
+def load_resumen_metricas(id_local: Optional[int] = None) -> Dict[str, Any]:
+    """Obtiene métricas cuantitativas y financieras de stock y alertas para el local o consolidado."""
+    return calcular_resumen_metricas_df(load_inventario_alertas(id_local))
 
 
 def load_lotes_selector() -> pd.DataFrame:
