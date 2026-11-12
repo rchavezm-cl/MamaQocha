@@ -4,7 +4,7 @@
 //             con Cache-Fallback automático para apertura 100% offline.
 // ==============================================================================
 
-const CACHE_NAME = 'mamaqocha-cocina-v3';
+const CACHE_NAME = 'mamaqocha-cocina-v4';
 const ASSETS_TO_CACHE = [
   '/cocina/',
   '/cocina/index.html',
