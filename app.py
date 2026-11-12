@@ -1218,6 +1218,8 @@ st.markdown(
         display: flex;
         align-items: center;
         justify-content: center;
+        font-size: 2.15rem;
+        line-height: 1;
         flex-shrink: 0;
         box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2);
     }
@@ -2088,20 +2090,7 @@ st.markdown(
     <div class="hero-container">
         <div class="hero-flex-top">
             <div class="hero-brand-group">
-                <div class="hero-icon-box">
-                    <svg width="34" height="34" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="18" cy="13" r="6" fill="url(#sunGrad)" />
-                        <path d="M4 24C7.5 21 11 21 14.5 24C18 27 21.5 27 25 24C28.5 21 30.5 22 32 23.5" stroke="#38bdf8" stroke-width="2.6" stroke-linecap="round"/>
-                        <path d="M6 29.5C9.5 26.5 13 26.5 16.5 29.5C20 32.5 23.5 32.5 27 29.5C29 27.8 30.5 28 31.5 29" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round"/>
-                        <path d="M18 3V5M9.5 6.5L11 8M26.5 6.5L25 8" stroke="#fbbf24" stroke-width="2" stroke-linecap="round"/>
-                        <defs>
-                            <linearGradient id="sunGrad" x1="12" y1="7" x2="24" y2="19" gradientUnits="userSpaceOnUse">
-                                <stop stop-color="#fde047"/>
-                                <stop offset="1" stop-color="#f59e0b"/>
-                            </linearGradient>
-                        </defs>
-                    </svg>
-                </div>
+                <div class="hero-icon-box">🦙</div>
                 <div>
                     <h1 class="hero-title-text">
                         Mamá Qocha
