@@ -4927,20 +4927,32 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     if maestros_sub == "prov":
         todos_prov_df = _c_proveedores(solo_activos=False)
+        n_p_tot = len(todos_prov_df)
+        n_p_act = int(todos_prov_df["activo"].sum()) if not todos_prov_df.empty else 0
 
-        col_p_tbl, col_p_act = st.columns([1.5, 1])
+        col_p_tbl, col_p_act = st.columns([1.25, 1.25])
 
         with col_p_tbl:
-            st.markdown("##### 📋 Proveedores Registrados")
+            st.markdown(
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;'>"
+                f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>📋 Proveedores Registrados</span>"
+                f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_p_act} Activos / {n_p_tot} Total</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
             if todos_prov_df.empty:
                 st.info("No hay proveedores dados de alta.")
+                prov_sel_idx = None
             else:
-                st.dataframe(
+                prov_event = st.dataframe(
                     todos_prov_df[[
                         "id_proveedor", "nombre", "rut", "telefono", "correo", "activo"
                     ]],
                     width="stretch",
                     hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    key="df_prov_tbl",
                     column_config={
                         "id_proveedor": st.column_config.NumberColumn("ID", width="small"),
                         "nombre": "Razón Social / Nombre",
@@ -4950,6 +4962,11 @@ elif nav_tab == "maestros":
                         "activo": st.column_config.CheckboxColumn("Activo", width="small"),
                     },
                 )
+                prov_sel_rows = prov_event.selection.rows if (prov_event and hasattr(prov_event, "selection")) else []
+                prov_sel_idx = prov_sel_rows[0] if prov_sel_rows else None
+                if prov_sel_idx is not None:
+                    prov_clicked_row = todos_prov_df.iloc[prov_sel_idx]
+                    st.caption(f"👆 Proveedor seleccionado: **{prov_clicked_row['nombre']}** (ID #{prov_clicked_row['id_proveedor']}).")
 
         with col_p_act:
             st.markdown("##### 🛠️ Acciones")
@@ -4964,12 +4981,16 @@ elif nav_tab == "maestros":
                 with st.container(border=True):
                     st.markdown("###### Alta de Proveedor")
                     with st.form("form_alta_prov", clear_on_submit=True):
-                        p_nom = st.text_input("Nombre / Razón Social:*", placeholder="Ej. Frigorífico del Sur")
-                        p_rut = st.text_input("RUT / Identificador fiscal:", placeholder="Ej. 76.123.456-7")
-                        p_tel = st.text_input("Teléfono:", placeholder="+56 9 1234 5678")
-                        p_mail = st.text_input("Correo electrónico:", placeholder="contacto@frigorifico.cl")
-                        p_dir = st.text_input("Dirección comercial:", placeholder="Av. Los Aromos 450")
-                        p_act = st.checkbox("Proveedor Habilitado (Activo)", value=True)
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            p_nom = st.text_input("Nombre / Razón Social:*", placeholder="Ej. Frigorífico del Sur")
+                            p_tel = st.text_input("Teléfono:", placeholder="+56 9 1234 5678")
+                            p_dir = st.text_input("Dirección comercial:", placeholder="Av. Los Aromos 450")
+                        with c2:
+                            p_rut = st.text_input("RUT / Identificador fiscal:", placeholder="Ej. 76.123.456-7")
+                            p_mail = st.text_input("Correo electrónico:", placeholder="contacto@frigorifico.cl")
+                            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                            p_act = st.checkbox("Proveedor Habilitado (Activo)", value=True)
 
                         btn_crear_prov = st.form_submit_button("💾 Guardar Proveedor", type="primary", width="stretch")
 
@@ -5002,22 +5023,34 @@ elif nav_tab == "maestros":
                             int(row["id_proveedor"]): f"{row['nombre']} ({row['rut'] or 'Sin RUT'})"
                             for _, row in todos_prov_df.iterrows()
                         }
+                        opciones_prov_keys = list(dict_opc_prov.keys())
+                        default_prov_idx = 0
+                        if prov_sel_idx is not None:
+                            target_id = int(todos_prov_df.iloc[prov_sel_idx]["id_proveedor"])
+                            if target_id in opciones_prov_keys:
+                                default_prov_idx = opciones_prov_keys.index(target_id)
+
                         prov_id_edit = st.selectbox(
                             "Selecciona el proveedor a modificar:",
-                            options=list(dict_opc_prov.keys()),
+                            options=opciones_prov_keys,
+                            index=default_prov_idx,
                             format_func=lambda k: dict_opc_prov[k],
-                            key="sel_edit_prov",
+                            key=f"sel_edit_prov_{prov_sel_idx}",
                         )
 
                         fila_edit_p = todos_prov_df[todos_prov_df["id_proveedor"] == prov_id_edit].iloc[0]
 
                         with st.form("form_edit_prov"):
-                            ed_nom = st.text_input("Nombre / Razón Social:*", value=str(fila_edit_p["nombre"]))
-                            ed_rut = st.text_input("RUT / Identificador:", value=str(fila_edit_p["rut"] or ""))
-                            ed_tel = st.text_input("Teléfono:", value=str(fila_edit_p["telefono"] or ""))
-                            ed_mail = st.text_input("Correo electrónico:", value=str(fila_edit_p["correo"] or ""))
-                            ed_dir = st.text_input("Dirección:", value=str(fila_edit_p["direccion"] or ""))
-                            ed_act = st.checkbox("Proveedor Habilitado (Activo)", value=bool(fila_edit_p["activo"]))
+                            ce1, ce2 = st.columns(2)
+                            with ce1:
+                                ed_nom = st.text_input("Nombre / Razón Social:*", value=str(fila_edit_p["nombre"]))
+                                ed_tel = st.text_input("Teléfono:", value=str(fila_edit_p["telefono"] or ""))
+                                ed_dir = st.text_input("Dirección:", value=str(fila_edit_p["direccion"] or ""))
+                            with ce2:
+                                ed_rut = st.text_input("RUT / Identificador:", value=str(fila_edit_p["rut"] or ""))
+                                ed_mail = st.text_input("Correo electrónico:", value=str(fila_edit_p["correo"] or ""))
+                                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                                ed_act = st.checkbox("Proveedor Habilitado (Activo)", value=bool(fila_edit_p["activo"]))
 
                             btn_update_prov = st.form_submit_button("🔄 Actualizar Proveedor", type="primary", width="stretch")
 
@@ -5046,28 +5079,45 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     elif maestros_sub == "prod":
         todos_prod_df = _c_productos(solo_activos=False)
+        n_pr_tot = len(todos_prod_df)
+        n_pr_act = int(todos_prod_df["activo"].sum()) if not todos_prod_df.empty else 0
 
-        col_pr_tbl, col_pr_act = st.columns([1.5, 1])
+        col_pr_tbl, col_pr_act = st.columns([1.25, 1.25])
 
         with col_pr_tbl:
-            st.markdown("##### 📋 Catálogo de Materias Primas")
+            st.markdown(
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;'>"
+                f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>📋 Catálogo de Materias Primas</span>"
+                f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_pr_act} Activas / {n_pr_tot} Total</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
             if todos_prod_df.empty:
                 st.info("No hay productos registrados en la base de datos.")
+                prod_sel_idx = None
             else:
-                st.dataframe(
+                prod_event = st.dataframe(
                     todos_prod_df[[
                         "id_producto", "nombre", "unidad_medida", "descripcion", "activo"
                     ]],
                     width="stretch",
                     hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    key="df_prod_tbl",
                     column_config={
                         "id_producto": st.column_config.NumberColumn("ID", width="small"),
                         "nombre": "Materia Prima",
-                        "unidad_medida": "Unidad de Medida",
+                        "unidad_medida": "Unidad",
                         "descripcion": "Descripción / Ficha",
                         "activo": st.column_config.CheckboxColumn("Activo", width="small"),
                     },
                 )
+                prod_sel_rows = prod_event.selection.rows if (prod_event and hasattr(prod_event, "selection")) else []
+                prod_sel_idx = prod_sel_rows[0] if prod_sel_rows else None
+                if prod_sel_idx is not None:
+                    prod_clicked_row = todos_prod_df.iloc[prod_sel_idx]
+                    st.caption(f"👆 Materia prima seleccionada: **{prod_clicked_row['nombre']}** ({prod_clicked_row['unidad_medida']}).")
 
         with col_pr_act:
             st.markdown("##### 🛠️ Acciones")
@@ -5084,10 +5134,14 @@ elif nav_tab == "maestros":
                 with st.container(border=True):
                     st.markdown("###### Alta de Materia Prima")
                     with st.form("form_alta_prod", clear_on_submit=True):
-                        pr_nom = st.text_input("Nombre de la materia prima:*", placeholder="Ej. Salmón del Atlántico")
-                        pr_unid = st.selectbox("Unidad de Medida:*", unidades_disponibles, index=0)
-                        pr_desc = st.text_area("Descripción / Especificaciones:", placeholder="Corte fresco, grado sushi...", height=75)
-                        pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=True)
+                        cpr1, cpr2 = st.columns(2)
+                        with cpr1:
+                            pr_nom = st.text_input("Nombre de la materia prima:*", placeholder="Ej. Salmón del Atlántico")
+                            pr_unid = st.selectbox("Unidad de Medida:*", unidades_disponibles, index=0)
+                        with cpr2:
+                            pr_desc = st.text_input("Descripción / Especificaciones:", placeholder="Corte fresco, grado sushi...")
+                            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                            pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=True)
 
                         btn_crear_prod = st.form_submit_button("💾 Guardar Producto", type="primary", width="stretch")
 
@@ -5118,21 +5172,33 @@ elif nav_tab == "maestros":
                             int(row["id_producto"]): f"{row['nombre']} ({row['unidad_medida']})"
                             for _, row in todos_prod_df.iterrows()
                         }
+                        opciones_prod_keys = list(dict_opc_prod.keys())
+                        default_prod_idx = 0
+                        if prod_sel_idx is not None:
+                            target_pr_id = int(todos_prod_df.iloc[prod_sel_idx]["id_producto"])
+                            if target_pr_id in opciones_prod_keys:
+                                default_prod_idx = opciones_prod_keys.index(target_pr_id)
+
                         prod_id_edit = st.selectbox(
                             "Selecciona la materia prima a modificar:",
-                            options=list(dict_opc_prod.keys()),
+                            options=opciones_prod_keys,
+                            index=default_prod_idx,
                             format_func=lambda k: dict_opc_prod[k],
-                            key="sel_edit_prod",
+                            key=f"sel_edit_prod_{prod_sel_idx}",
                         )
 
                         fila_edit_pr = todos_prod_df[todos_prod_df["id_producto"] == prod_id_edit].iloc[0]
                         idx_unidad = unidades_disponibles.index(fila_edit_pr["unidad_medida"]) if fila_edit_pr["unidad_medida"] in unidades_disponibles else 0
 
                         with st.form("form_edit_prod"):
-                            ed_pr_nom = st.text_input("Nombre:*", value=str(fila_edit_pr["nombre"]))
-                            ed_pr_unid = st.selectbox("Unidad de Medida:*", unidades_disponibles, index=idx_unidad)
-                            ed_pr_desc = st.text_area("Descripción:", value=str(fila_edit_pr["descripcion"] or ""), height=75)
-                            ed_pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=bool(fila_edit_pr["activo"]))
+                            cpe1, cpe2 = st.columns(2)
+                            with cpe1:
+                                ed_pr_nom = st.text_input("Nombre:*", value=str(fila_edit_pr["nombre"]))
+                                ed_pr_unid = st.selectbox("Unidad de Medida:*", unidades_disponibles, index=idx_unidad)
+                            with cpe2:
+                                ed_pr_desc = st.text_input("Descripción:", value=str(fila_edit_pr["descripcion"] or ""))
+                                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                                ed_pr_act = st.checkbox("Materia Prima Habilitada (Activa)", value=bool(fila_edit_pr["activo"]))
 
                             btn_update_prod = st.form_submit_button("🔄 Actualizar Producto", type="primary", width="stretch")
 
@@ -5214,25 +5280,37 @@ elif nav_tab == "maestros":
     # --------------------------------------------------------------------------
     elif maestros_sub == "usuarios":
         todos_usr_df = _c_usuarios(solo_activos=False)
+        n_u_tot = len(todos_usr_df)
+        n_u_act = int(todos_usr_df["activo"].sum()) if not todos_usr_df.empty else 0
 
-        col_u_tbl, col_u_act = st.columns([1.5, 1])
+        col_u_tbl, col_u_act = st.columns([1.25, 1.25])
 
         with col_u_tbl:
-            st.markdown("##### 👥 Personal Operativo y Usuarios del Sistema")
+            st.markdown(
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;'>"
+                f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>👥 Personal Operativo y Usuarios</span>"
+                f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_u_act} Activos / {n_u_tot} Total</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
             st.caption("Personal habilitado para firmar recepciones, despachos de cocina, mermas y traslados con PIN táctil.")
             if todos_usr_df.empty:
                 st.info("No hay usuarios registrados en el sistema.")
+                usr_sel_idx = None
             else:
                 dict_loc_nomb = {row["id_local"]: row["nombre"] for _, row in locales_df.iterrows()}
                 df_u_show = todos_usr_df.copy()
-                df_u_show["local_nombre"] = df_u_show["id_local"].map(dict_loc_nomb).fillna("🌐 Todos los Locales (Admin)")
+                df_u_show["local_nombre"] = df_u_show["id_local"].map(dict_loc_nomb).fillna("🌐 Todos (Admin)")
 
-                st.dataframe(
+                usr_event = st.dataframe(
                     df_u_show[[
                         "id_usuario", "nombre", "nombre_usuario", "rol", "local_nombre", "pin", "activo"
                     ]],
                     width="stretch",
                     hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    key="df_usr_tbl",
                     column_config={
                         "id_usuario": st.column_config.NumberColumn("ID", width="small"),
                         "nombre": "Nombre y Apellido",
@@ -5243,6 +5321,11 @@ elif nav_tab == "maestros":
                         "activo": st.column_config.CheckboxColumn("Activo", width="small"),
                     },
                 )
+                usr_sel_rows = usr_event.selection.rows if (usr_event and hasattr(usr_event, "selection")) else []
+                usr_sel_idx = usr_sel_rows[0] if usr_sel_rows else None
+                if usr_sel_idx is not None:
+                    usr_clicked_row = df_u_show.iloc[usr_sel_idx]
+                    st.caption(f"👆 Personal seleccionado: **{usr_clicked_row['nombre']}** ({usr_clicked_row['nombre_usuario']}).")
 
         with col_u_act:
             st.markdown("##### 🛠️ Acciones de Personal")
@@ -5270,8 +5353,15 @@ elif nav_tab == "maestros":
                 with st.container(border=True):
                     st.markdown("###### Alta de Personal / Usuario")
                     with st.form("form_alta_usuario", clear_on_submit=True):
-                        u_nom = st.text_input("Nombre y Apellido:*", placeholder="Ej. Carlos Mendoza")
-                        u_uname = st.text_input("Nombre de usuario (Login):*", placeholder="Ej. cmendoza").strip().lower()
+                        cu1, cu2 = st.columns(2)
+                        with cu1:
+                            u_nom = st.text_input("Nombre y Apellido:*", placeholder="Ej. Carlos Mendoza")
+                            u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value="1234", max_chars=4, help="PIN numérico para pantalla táctil en cocina").strip()
+                        with cu2:
+                            u_uname = st.text_input("Nombre de usuario (Login):*", placeholder="Ej. cmendoza").strip().lower()
+                            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                            u_act = st.checkbox("Usuario Activo", value=True)
+
                         u_rol = _select_pills(
                             "Rol operativo:*",
                             roles_disponibles,
@@ -5285,8 +5375,6 @@ elif nav_tab == "maestros":
                             default_key=0,
                         )
                         u_local = None if u_local_cod == 0 else int(u_local_cod)
-                        u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value="1234", max_chars=4, help="PIN numérico para pantalla táctil en cocina").strip()
-                        u_act = st.checkbox("Usuario Activo", value=True)
 
                         btn_crear_usr = st.form_submit_button("💾 Guardar Personal", type="primary", width="stretch")
 
@@ -5321,11 +5409,19 @@ elif nav_tab == "maestros":
                             row["id_usuario"]: f"#{row['id_usuario']} - {row['nombre']} ({row['rol']})"
                             for _, row in todos_usr_df.iterrows()
                         }
+                        opciones_usr_keys = list(dict_usr_sel.keys())
+                        default_usr_idx = 0
+                        if usr_sel_idx is not None:
+                            target_u_id = int(todos_usr_df.iloc[usr_sel_idx]["id_usuario"])
+                            if target_u_id in opciones_usr_keys:
+                                default_usr_idx = opciones_usr_keys.index(target_u_id)
+
                         usr_sel_id = st.selectbox(
                             "Seleccionar usuario:",
-                            options=list(dict_usr_sel.keys()),
+                            options=opciones_usr_keys,
+                            index=default_usr_idx,
                             format_func=lambda k: dict_usr_sel[k],
-                            key="sel_mod_usr",
+                            key=f"sel_mod_usr_{usr_sel_idx}",
                         )
 
                         fila_u = todos_usr_df[todos_usr_df["id_usuario"] == usr_sel_id].iloc[0]
@@ -5334,7 +5430,15 @@ elif nav_tab == "maestros":
                         loc_actual_cod = int(fila_u["id_local"]) if pd.notna(fila_u["id_local"]) else 0
 
                         with st.form("form_edit_usuario"):
-                            e_u_nom = st.text_input("Nombre y Apellido:*", value=str(fila_u["nombre"]))
+                            cue1, cue2 = st.columns(2)
+                            with cue1:
+                                e_u_nom = st.text_input("Nombre y Apellido:*", value=str(fila_u["nombre"]))
+                                e_u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value=str(fila_u["pin"] or "1234"), max_chars=4).strip()
+                            with cue2:
+                                st.text_input("Nombre de usuario:", value=str(fila_u["nombre_usuario"]), disabled=True)
+                                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                                e_u_act = st.checkbox("Usuario Activo", value=bool(fila_u["activo"]))
+
                             e_u_rol = _select_pills(
                                 "Rol operativo:*",
                                 roles_disponibles,
@@ -5350,8 +5454,6 @@ elif nav_tab == "maestros":
                                 force_key=loc_actual_cod if (cambio_usr and loc_actual_cod in opciones_locales_usr) else None,
                             )
                             e_u_loc = None if e_u_loc_cod == 0 else int(e_u_loc_cod)
-                            e_u_pin = st.text_input("PIN Táctil KDS (4 dígitos):*", value=str(fila_u["pin"] or "1234"), max_chars=4).strip()
-                            e_u_act = st.checkbox("Usuario Activo", value=bool(fila_u["activo"]))
 
                             btn_mod_usr = st.form_submit_button("🔄 Actualizar Datos", type="primary", width="stretch")
 
