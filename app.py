@@ -1209,6 +1209,7 @@ st.markdown(
         gap: 8px;
         margin: 0;
         padding: 2px 0;
+        flex-wrap: nowrap;
     }
     .module-header-title {
         font-size: 1.25rem;
@@ -1219,6 +1220,7 @@ st.markdown(
         align-items: center;
         gap: 6px;
         line-height: 1.2;
+        white-space: nowrap;
     }
     .module-header-tag {
         font-size: 0.72rem;
@@ -1228,6 +1230,7 @@ st.markdown(
         padding: 2px 8px;
         border-radius: 6px;
         font-weight: 600;
+        white-space: nowrap;
     }
 
     /* Estilos globales y tipografía */
@@ -4895,7 +4898,7 @@ elif nav_tab == "reportes":
 # TAB 8: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
 # ==============================================================================
 elif nav_tab == "maestros":
-    col_mae_head1, col_mae_head2 = st.columns([1.0, 2.0], vertical_alignment="center")
+    col_mae_head1, col_mae_head2 = st.columns([1.25, 2.0], vertical_alignment="center")
     with col_mae_head1:
         st.markdown(
             """
@@ -4934,7 +4937,7 @@ elif nav_tab == "maestros":
 
         with col_p_tbl:
             st.markdown(
-                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;'>"
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;'>"
                 f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>📋 Proveedores Registrados</span>"
                 f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_p_act} Activos / {n_p_tot} Total</span>"
                 f"</div>",
@@ -5086,7 +5089,7 @@ elif nav_tab == "maestros":
 
         with col_pr_tbl:
             st.markdown(
-                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;'>"
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;'>"
                 f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>📋 Catálogo de Materias Primas</span>"
                 f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_pr_act} Activas / {n_pr_tot} Total</span>"
                 f"</div>",
@@ -5287,7 +5290,7 @@ elif nav_tab == "maestros":
 
         with col_u_tbl:
             st.markdown(
-                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;'>"
+                f"<div style='display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;'>"
                 f"<span style='font-size: 1.05rem; font-weight: 600; color: #1e293b;'>👥 Personal Operativo y Usuarios</span>"
                 f"<span style='font-size: 0.8rem; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 12px; font-weight: 600;'>🟢 {n_u_act} Activos / {n_u_tot} Total</span>"
                 f"</div>",
