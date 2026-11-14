@@ -23,7 +23,7 @@ import reportes_pdf
 # ==============================================================================
 # CACHÉ EN MEMORIA DE CONSULTAS A NEON POSTGRESQL Y SELECTOR EN PASTILLAS
 # ==============================================================================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_catalogo_base() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Precarga en paralelo los 4 catálogos maestros activos en un único bloque paralelo."""
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -34,32 +34,32 @@ def _c_catalogo_base() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Dat
         return fut_loc.result(), fut_prov.result(), fut_prod.result(), fut_usr.result()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_locales() -> pd.DataFrame:
     return db.load_locales()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_proveedores(solo_activos: bool = True) -> pd.DataFrame:
     return db.load_proveedores(solo_activos=solo_activos)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_productos(solo_activos: bool = True) -> pd.DataFrame:
     return db.load_productos(solo_activos=solo_activos)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_usuarios(solo_activos: bool = True) -> pd.DataFrame:
     return db.load_usuarios(solo_activos=solo_activos)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_recetas(solo_activas: bool = True) -> pd.DataFrame:
     return db.load_recetas(solo_activas=solo_activas)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _c_recetas_catalogo(solo_activas: bool = True) -> pd.DataFrame:
     return db.load_recetas_catalogo(solo_activas=solo_activas)
 
@@ -2150,6 +2150,135 @@ nav_tab = _select_pills(
 st.markdown("<hr style='margin: 4px 0 14px 0; border-color: #e2e8f0;'>", unsafe_allow_html=True)
 
 # ==============================================================================
+# FRAGMENTO REACTIVO: DETALLE Y AUDITORÍA DE LOTES EN STOCK
+# ==============================================================================
+@st.fragment
+def _render_detalle_lotes_fragment(inventario_df: pd.DataFrame, nombre_local_ctx: str) -> None:
+    """Renderiza el buscador y la grilla de lotes de forma reactiva y aislada sin refrescar toda la página."""
+    if inventario_df.empty:
+        st.info("ℹ️ No hay existencias registradas para el local seleccionado.")
+        return
+
+    tot_count = len(inventario_df)
+    venc_count = int((inventario_df["severidad_alerta"] == 1).sum()) if not inventario_df.empty else 0
+    crit_count = int((inventario_df["severidad_alerta"] == 2).sum()) if not inventario_df.empty else 0
+    prev_count = int((inventario_df["severidad_alerta"] == 3).sum()) if not inventario_df.empty else 0
+    opt_count = int((inventario_df["severidad_alerta"] == 4).sum()) if not inventario_df.empty else 0
+
+    col_filtro1, col_filtro2 = st.columns([1.1, 1.9])
+    with col_filtro1:
+        OPC_FILTRO_ALERTA = {
+            "Todos los niveles": f"🌐 Todos ({tot_count})",
+            "🔴 Vencido": f"🔴 Vencido ({venc_count})",
+            "🟠 Crítico (≤ 7 días)": f"🟠 Crítico ({crit_count})",
+            "🟡 Preventivo (8-30 días)": f"🟡 Preventivo ({prev_count})",
+            "🟢 Óptimo (> 30 días)": f"🟢 Óptimo ({opt_count})",
+        }
+        filtro_alerta = _select_pills(
+            "Filtrar por nivel de riesgo:",
+            OPC_FILTRO_ALERTA,
+            key="pill_filtro_alerta_frag",
+            default_key="Todos los niveles",
+        )
+    with col_filtro2:
+        filtro_busqueda = st.text_input(
+            "Buscar por producto, proveedor o código de lote:",
+            placeholder="Ej. Atún, Vacuno Demo, L-2026...",
+            key="input_busqueda_lotes_frag",
+        )
+
+    datos_filtrados = inventario_df.copy()
+    if filtro_alerta != "Todos los niveles":
+        datos_filtrados = datos_filtrados[datos_filtrados["estado_alerta"] == filtro_alerta]
+
+    if filtro_busqueda.strip():
+        patron = filtro_busqueda.strip().lower()
+        datos_filtrados = datos_filtrados[
+            datos_filtrados["producto"].str.lower().str.contains(patron)
+            | datos_filtrados["codigo_lote_proveedor"].str.lower().str.contains(patron)
+            | datos_filtrados["proveedor"].str.lower().str.contains(patron)
+        ]
+
+    # Barra informativa contextual y botón de exportar
+    col_info_cnt, col_info_exp = st.columns([3, 1])
+    with col_info_cnt:
+        st.markdown(
+            f"<div style='font-size:0.85rem; color:#475569; margin: 4px 0 8px 0;'>"
+            f"Mostrando <strong>{len(datos_filtrados)}</strong> de <strong>{tot_count}</strong> lotes en existencia "
+            f"• Vista: <strong>{nombre_local_ctx}</strong>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with col_info_exp:
+        csv_data = datos_filtrados.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Exportar CSV",
+            data=csv_data,
+            file_name=f"Inventario_Lotes_{date.today().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="btn_export_lotes_csv",
+            width="stretch",
+        )
+
+    # Alerta visual de criticidad
+    criticos_totales = datos_filtrados[datos_filtrados["severidad_alerta"] <= 2]
+    if not criticos_totales.empty:
+        st.warning(
+            f"⚠️ Hay **{len(criticos_totales)} lotes prioritarios** (vencidos o críticos) en la selección actual. "
+            "Recuerda priorizar su despacho aplicando la recomendación de orden FEFO."
+        )
+
+    columnas_mostrar = [
+        "estado_alerta",
+        "dias_para_vencer",
+        "fecha_vencimiento",
+        "producto",
+        "codigo_lote_proveedor",
+        "temperatura_recepcion",
+        "cantidad",
+        "unidad_medida",
+        "costo_unitario",
+        "valor_inventario",
+        "local",
+        "proveedor",
+        "documento_compra",
+    ]
+
+    for col_req, val_defecto in [
+        ("temperatura_recepcion", 2.0),
+        ("costo_unitario", 0.0),
+        ("valor_inventario", 0.0),
+    ]:
+        if col_req not in datos_filtrados.columns:
+            datos_filtrados[col_req] = val_defecto
+
+    st.dataframe(
+        datos_filtrados[columnas_mostrar],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "estado_alerta": st.column_config.TextColumn("Alerta", width="medium"),
+            "dias_para_vencer": st.column_config.NumberColumn(
+                "Días restantes",
+                format="%d d",
+                help="Días calendario hasta la fecha de expiración",
+            ),
+            "fecha_vencimiento": st.column_config.DateColumn("Vencimiento", format="YYYY-MM-DD"),
+            "producto": "Materia Prima",
+            "codigo_lote_proveedor": "Lote Proveedor",
+            "temperatura_recepcion": st.column_config.NumberColumn("Temp. Ingreso", format="%.1f °C"),
+            "cantidad": st.column_config.NumberColumn("Stock Actual", format="%.3f"),
+            "unidad_medida": "Unidad",
+            "costo_unitario": st.column_config.NumberColumn("Costo/kg", format="$%d"),
+            "valor_inventario": st.column_config.NumberColumn("Valor Stock", format="$%d"),
+            "local": "Local Físico",
+            "proveedor": "Proveedor",
+            "documento_compra": "Documento",
+        },
+    )
+
+
+# ==============================================================================
 # TAB 1: SEMÁFORO Y ALERTAS DE VENCIMIENTO CON VALORIZACIÓN
 # ==============================================================================
 if nav_tab == "alertas":
@@ -2159,704 +2288,724 @@ if nav_tab == "alertas":
         "en cocina, erradicar pérdidas por caducidad y cuantificar el capital inmovilizado en riesgo."
     )
 
-    # Tarjeta Ejecutiva Financiera Unificada con Barra de Riesgo
-    tot_val = metricas['total_valor'] if metricas['total_valor'] > 0 else 1.0
-    pct_venc = (metricas['valor_vencidos'] / tot_val) * 100
-    pct_crit = (metricas['valor_criticos'] / tot_val) * 100
-    pct_prev = (metricas['valor_preventivos'] / tot_val) * 100
-    pct_opt = max(0.0, 100.0 - pct_venc - pct_crit - pct_prev)
-
-    st.markdown(
-        f"""
-        <div class="hero-fin-card">
-            <div class="hero-fin-grid">
-                <div class="hero-fin-col">
-                    <span class="hero-fin-title">💼 Valorización del Inventario Activo</span>
-                    <div class="hero-fin-val-blue">${metricas['total_valor']:,.0f} CLP</div>
-                    <span style="font-size:0.8rem; color:#64748b; margin-top:4px;">
-                        Calculado según costo unitario real en facturas de compra ({metricas['total_lotes']} lotes activos).
-                    </span>
-                </div>
-                <div class="hero-fin-col">
-                    <span class="hero-fin-title">⚠️ Capital en Riesgo de Vencimiento</span>
-                    <div class="hero-fin-val-red">${metricas['valor_en_riesgo']:,.0f} CLP</div>
-                    <div>
-                        <span class="hero-fin-badge-crit">
-                            🚨 <strong>{metricas['pct_en_riesgo']:.1f}%</strong> del Capital en Riesgo (≤ 7 días / vencido)
-                        </span>
-                    </div>
-                </div>
-            </div>
-            <div class="risk-bar-container">
-                <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:700; color:#475569; margin-bottom:6px;">
-                    <span>DISTRIBUCIÓN DEL CAPITAL POR NIVEL DE RIESGO:</span>
-                    <span>100% AUDITADO</span>
-                </div>
-                <div class="risk-bar">
-                    <div class="risk-bar-seg" style="width:{pct_venc:.1f}%; background:#e63946;" title="Vencidos: {pct_venc:.1f}%"></div>
-                    <div class="risk-bar-seg" style="width:{pct_crit:.1f}%; background:#f77f00;" title="Críticos: {pct_crit:.1f}%"></div>
-                    <div class="risk-bar-seg" style="width:{pct_prev:.1f}%; background:#fcbf49;" title="Preventivos: {pct_prev:.1f}%"></div>
-                    <div class="risk-bar-seg" style="width:{pct_opt:.1f}%; background:#2a9d8f;" title="Óptimos: {pct_opt:.1f}%"></div>
-                </div>
-                <div class="risk-legend-row">
-                    <span><strong style="color:#e63946;">🔴 Vencido:</strong> {pct_venc:.1f}% (${metricas['valor_vencidos']:,.0f})</span>
-                    <span><strong style="color:#f77f00;">🟠 Crítico:</strong> {pct_crit:.1f}% (${metricas['valor_criticos']:,.0f})</span>
-                    <span><strong style="color:#b38600;">🟡 Preventivo:</strong> {pct_prev:.1f}% (${metricas['valor_preventivos']:,.0f})</span>
-                    <span><strong style="color:#2a9d8f;">🟢 Óptimo:</strong> {pct_opt:.1f}% (${metricas['valor_optimos']:,.0f})</span>
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    SUBTABS_ALERTAS = {
+        "resumen": "📊 Resumen Ejecutivo & Semáforo",
+        "oportunidades": "🍳 Oportunidades & Rescate en Carta",
+        "lotes": "📋 Detalle de Lotes en Stock",
+    }
+    sub_tab_alerta = _select_pills(
+        "Sección del Monitor:",
+        SUBTABS_ALERTAS,
+        key="subnav_alertas_panel",
+        default_key="resumen",
+        label_visibility="collapsed",
     )
-
-    # Tarjetas Modulares del Semáforo
-    kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-
-    with kpi_col1:
-        st.markdown(
-            f"""
-            <div class="semaforo-card" style="border-top: 5px solid #e63946;">
-                <div class="semaforo-header" style="color: #e63946;">🔴 Vencidos</div>
-                <div class="semaforo-num-flex">
-                    <span class="semaforo-num" style="color: #e63946;">{metricas['vencidos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
-                    <span class="semaforo-monto-pill" style="background:#fee2e2; color:#b91c1c;">${metricas['valor_vencidos']:,.0f}</span>
-                </div>
-                <div class="semaforo-sub">Caducados (Acción inmediata)</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with kpi_col2:
-        st.markdown(
-            f"""
-            <div class="semaforo-card" style="border-top: 5px solid #f77f00;">
-                <div class="semaforo-header" style="color: #c2410c;">🟠 Crítico (≤ 7 d)</div>
-                <div class="semaforo-num-flex">
-                    <span class="semaforo-num" style="color: #f77f00;">{metricas['criticos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
-                    <span class="semaforo-monto-pill" style="background:#ffedd5; color:#c2410c;">${metricas['valor_criticos']:,.0f}</span>
-                </div>
-                <div class="semaforo-sub">Prioridad máxima en cocina</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with kpi_col3:
-        st.markdown(
-            f"""
-            <div class="semaforo-card" style="border-top: 5px solid #e0a912;">
-                <div class="semaforo-header" style="color: #a16207;">🟡 Preventivo (8-30 d)</div>
-                <div class="semaforo-num-flex">
-                    <span class="semaforo-num" style="color: #d97706;">{metricas['preventivos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
-                    <span class="semaforo-monto-pill" style="background:#fef3c7; color:#92400e;">${metricas['valor_preventivos']:,.0f}</span>
-                </div>
-                <div class="semaforo-sub">En observación y rotación regular</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with kpi_col4:
-        st.markdown(
-            f"""
-            <div class="semaforo-card" style="border-top: 5px solid #2a9d8f;">
-                <div class="semaforo-header" style="color: #15803d;">🟢 Óptimo (> 30 d)</div>
-                <div class="semaforo-num-flex">
-                    <span class="semaforo-num" style="color: #2a9d8f;">{metricas['optimos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
-                    <span class="semaforo-monto-pill" style="background:#dcfce7; color:#15803d;">${metricas['valor_optimos']:,.0f}</span>
-                </div>
-                <div class="semaforo-sub">Vida útil segura y holgada</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown("<hr style='margin: 4px 0 14px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     inventario_df = _c_inventario_alertas(id_local=id_local_activo)
 
     # --------------------------------------------------------------------------
-    # NUEVA FILA: KPIS DE GESTIÓN Y CONTROL EJECUTIVO (ESTILIZADOS)
+    # SUB-TAB A: RESUMEN EJECUTIVO & SEMÁFORO FINANCIERO
     # --------------------------------------------------------------------------
-    total_val_inv = float(inventario_df["valor_inventario"].sum()) if not inventario_df.empty else 0.0
-    potencial_facturacion = total_val_inv * 3.2
-    lotes_haccp_ok = len(inventario_df[inventario_df["temperatura_recepcion"] <= 4.0]) if not inventario_df.empty else 0
-    total_lotes_inv = len(inventario_df) if not inventario_df.empty else 1
-    pct_haccp = (lotes_haccp_ok / total_lotes_inv * 100)
-    dias_vida_pond = (
-        float((inventario_df["dias_para_vencer"] * inventario_df["valor_inventario"]).sum() / total_val_inv)
-        if total_val_inv > 0
-        else 0.0
-    )
-    total_kg_stock = float(inventario_df["cantidad"].sum()) if not inventario_df.empty else 0.0
-    porciones_totales_estimadas = int(total_kg_stock / 0.220) if total_kg_stock > 0 else 0
+    if sub_tab_alerta == "resumen":
+        tot_val = metricas['total_valor'] if metricas['total_valor'] > 0 else 1.0
+        pct_venc = (metricas['valor_vencidos'] / tot_val) * 100
+        pct_crit = (metricas['valor_criticos'] / tot_val) * 100
+        pct_prev = (metricas['valor_preventivos'] / tot_val) * 100
+        pct_opt = max(0.0, 100.0 - pct_venc - pct_crit - pct_prev)
 
-    col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
-
-    with col_ex1:
         st.markdown(
             f"""
-            <div class="op-kpi-card">
-                <div class="op-kpi-head">
-                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#ffffff;">💵</div>
-                    <span class="op-kpi-title">Potencial Facturación Carta</span>
-                </div>
-                <div class="op-kpi-val">${potencial_facturacion:,.0f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">CLP</span></div>
-                <div>
-                    <span class="op-kpi-tag" style="background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">
-                        ↑ Factor 3.2× Costo (Gastro)
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col_ex2:
-        st.markdown(
-            f"""
-            <div class="op-kpi-card">
-                <div class="op-kpi-head">
-                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #0284c7 0%, #0369a1 100%); color:#ffffff;">🛡️</div>
-                    <span class="op-kpi-title">Inocuidad HACCP (≤ 4°C)</span>
-                </div>
-                <div class="op-kpi-val">{pct_haccp:.1f}%</div>
-                <div>
-                    <span class="op-kpi-tag" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd;">
-                        ↑ {lotes_haccp_ok}/{total_lotes_inv} lotes seguros
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col_ex3:
-        st.markdown(
-            f"""
-            <div class="op-kpi-card">
-                <div class="op-kpi-head">
-                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color:#ffffff;">⏳</div>
-                    <span class="op-kpi-title">Vida Útil Ponderada</span>
-                </div>
-                <div class="op-kpi-val">{dias_vida_pond:.1f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">días</span></div>
-                <div>
-                    <span class="op-kpi-tag" style="background:#fefce8; color:#a16207; border:1px solid #fef08a;">
-                        Ponderado por capital
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col_ex4:
-        st.markdown(
-            f"""
-            <div class="op-kpi-card">
-                <div class="op-kpi-head">
-                    <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color:#ffffff;">🍽️</div>
-                    <span class="op-kpi-title">Capacidad de Comandas</span>
-                </div>
-                <div class="op-kpi-val">{porciones_totales_estimadas:,} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">platos</span></div>
-                <div>
-                    <span class="op-kpi-tag" style="background:#eef2ff; color:#4338ca; border:1px solid #c7d2fe;">
-                        ↑ {total_kg_stock:.1f} kg activos
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if inventario_df.empty:
-        st.info("ℹ️ No hay existencias registradas para el local seleccionado.")
-    else:
-        # --------------------------------------------------------------------------
-        # TOP PREPARACIONES SUGERIDAS (RESCATE DE MATERIA PRIMA CRÍTICA EN CARTA)
-        # --------------------------------------------------------------------------
-        st.markdown("---")
-        st.markdown("#### 🍲 Top Preparaciones Recomendadas para la Carta del Día (Rescate de Insumos)")
-        st.caption(
-            "Cruce algorítmico entre materias primas en zona crítica y las fichas técnicas de Mamá Qocha. "
-            "Permite al chef y al administrador activar 'Sugerencias del Día' para monetizar el stock antes de que venza."
-        )
-
-        recetas_activas_df = _c_recetas(solo_activas=True)
-        lotes_urgentes = inventario_df[(inventario_df["dias_para_vencer"] >= 0) & (inventario_df["dias_para_vencer"] <= 7)]
-
-        if lotes_urgentes.empty:
-            st.success("✅ **Excelente estado operativo:** No se detectan insumos en riesgo crítico (≤ 7 días). Todo el inventario se encuentra en rango preventivo u óptimo.")
-        elif recetas_activas_df.empty:
-            st.info("No hay recetas activas registradas en el catálogo maestro.")
-        else:
-            insumos_urg_resumen = (
-                lotes_urgentes.groupby(["id_producto", "producto"])
-                .agg(
-                    kg_urgentes=("cantidad", "sum"),
-                    min_dias=("dias_para_vencer", "min"),
-                    locales=("local", lambda x: ", ".join(sorted(x.unique()))),
-                    valor_riesgo=("valor_inventario", "sum"),
-                )
-                .reset_index()
-            )
-
-            platos_sugeridos = []
-            for _, ins_row in insumos_urg_resumen.iterrows():
-                id_prod = ins_row["id_producto"]
-                nom_prod = ins_row["producto"]
-                kg_disp = float(ins_row["kg_urgentes"])
-                min_d = int(ins_row["min_dias"])
-                locs_str = ins_row["locales"]
-                val_rsk = float(ins_row["valor_riesgo"])
-
-                recetas_asoc = recetas_activas_df[recetas_activas_df["id_producto"] == id_prod]
-                for _, rec_row in recetas_asoc.iterrows():
-                    kg_por_plato = float(rec_row["cantidad_kg"])
-                    if kg_por_plato > 0:
-                        platos_posibles = int(kg_disp / kg_por_plato)
-                        if platos_posibles > 0:
-                            precio_vta = float(rec_row["precio_venta"])
-                            venta_recup = platos_posibles * precio_vta
-                            platos_sugeridos.append({
-                                "receta": rec_row["receta"],
-                                "categoria": rec_row["categoria"],
-                                "insumo_critico": nom_prod,
-                                "kg_en_riesgo": kg_disp,
-                                "porciones": platos_posibles,
-                                "precio_carta": precio_vta,
-                                "venta_recuperable": venta_recup,
-                                "dias_restantes": min_d,
-                                "locales": locs_str,
-                                "costo_riesgo": val_rsk,
-                            })
-
-            df_sugeridos = pd.DataFrame(platos_sugeridos)
-            if df_sugeridos.empty:
-                st.warning("Hay materias primas críticas pero no están vinculadas a recetas activas.")
-            else:
-                df_sugeridos = df_sugeridos.sort_values(by=["dias_restantes", "venta_recuperable"], ascending=[True, False])
-                venta_total_rescatable = df_sugeridos["venta_recuperable"].sum()
-
-                st.markdown(
-                    f"""
-                    <div style="background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 100%); border: 1px solid #fde68a; border-left: 6px solid #f59e0b; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px;">
-                        <strong style="color: #92400e; font-size: 1.05rem;">🎯 Oportunidad Comercial: Plan de Choque en Cocina</strong><br>
-                        <span style="color: #78350f; font-size: 0.9rem;">
-                            Se detectaron <strong>{len(insumos_urg_resumen)} materias primas críticas</strong> próximas a vencer. Al priorizar estos platos en la carta o menú de turno, 
-                            la cadena puede transformar hasta <strong style="color: #b45309; font-size: 1.05rem;">${venta_total_rescatable:,.0f} CLP</strong> en ventas efectivas, evitando mermas operativas.
+            <div class="hero-fin-card">
+                <div class="hero-fin-grid">
+                    <div class="hero-fin-col">
+                        <span class="hero-fin-title">💼 Valorización del Inventario Activo</span>
+                        <div class="hero-fin-val-blue">${metricas['total_valor']:,.0f} CLP</div>
+                        <span style="font-size:0.8rem; color:#64748b; margin-top:4px;">
+                            Calculado según costo unitario real en facturas de compra ({metricas['total_lotes']} lotes activos).
                         </span>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                top_platos = df_sugeridos.head(3)
-                cols_top = st.columns(len(top_platos))
-                for idx, (_, p_fila) in enumerate(top_platos.iterrows()):
-                    with cols_top[idx]:
-                        receta = p_fila["receta"]
-                        receta_lower = receta.lower()
-                        if any(k in receta_lower for k in ["lomo", "carne", "res"]):
-                            icono = "🥩"
-                            color_grad = "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)"
-                        elif any(k in receta_lower for k in ["gallina", "pollo", "ave"]):
-                            icono = "🍗"
-                            color_grad = "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)"
-                        elif any(k in receta_lower for k in ["ceviche", "pescado", "reineta", "salmon", "marisco", "pulpo"]):
-                            icono = "🐟"
-                            color_grad = "linear-gradient(135deg, #06b6d4 0%, #0284c7 100%)"
-                        elif any(k in receta_lower for k in ["arroz", "chaufa"]):
-                            icono = "🍚"
-                            color_grad = "linear-gradient(135deg, #10b981 0%, #059669 100%)"
-                        else:
-                            icono = "🍽️"
-                            color_grad = "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
-
-                        dias = int(p_fila["dias_restantes"])
-                        if dias <= 0:
-                            badge_html = '<span class="recipe-urg-critico">🔴 Vence Hoy</span>'
-                            color_borde_top = "#ef4444"
-                        elif dias <= 2:
-                            badge_html = f'<span class="recipe-urg-critico">🔴 Urgente ({dias}d)</span>'
-                            color_borde_top = "#ef4444"
-                        else:
-                            badge_html = f'<span class="recipe-urg-alta">🟠 Prioridad ({dias}d)</span>'
-                            color_borde_top = "#f59e0b"
-
-                        card_html = f"""
-                        <div class="recipe-card" style="border-top: 5px solid {color_borde_top};">
-                            <div class="recipe-card-top">
-                                <span class="recipe-cat-badge">{p_fila['categoria']}</span>
-                                {badge_html}
-                            </div>
-                            <div class="recipe-header-flex">
-                                <div class="recipe-avatar" style="background: {color_grad};">{icono}</div>
-                                <div style="flex: 1; min-width: 0;">
-                                    <div class="recipe-title" title="{receta}">{receta}</div>
-                                    <div class="recipe-carta">Carta: <strong>${p_fila['precio_carta']:,.0f}</strong></div>
-                                </div>
-                            </div>
-                            <div class="recipe-kpi-banner">
-                                <div>
-                                    <div class="recipe-kpi-num">{int(p_fila['porciones'])} <span style="font-size:0.85rem; font-weight:600;">platos</span></div>
-                                    <div class="recipe-kpi-sub">Porciones Sugeridas</div>
-                                </div>
-                                <div style="text-align: right;">
-                                    <div class="recipe-kpi-gain">+${p_fila['venta_recuperable']:,.0f}</div>
-                                    <div class="recipe-kpi-sub">Venta Recuperable</div>
-                                </div>
-                            </div>
-                            <div class="recipe-meta-list">
-                                <div class="recipe-meta-item">
-                                    <span style="color:#64748b;">⚠️ Insumo Crítico:</span>
-                                    <strong>{p_fila['kg_en_riesgo']:.1f} kg {p_fila['insumo_critico']}</strong>
-                                </div>
-                                <div class="recipe-meta-item">
-                                    <span style="color:#64748b;">📍 Sucursales:</span>
-                                    <span style="font-weight:600; font-size:0.76rem;">{p_fila['locales']}</span>
-                                </div>
-                            </div>
-                            <div class="recipe-footer-callout">
-                                💡 <strong>Sugerencia Chef:</strong> Ofrecer como especial de turno o promo 2×1.
-                            </div>
+                    <div class="hero-fin-col">
+                        <span class="hero-fin-title">⚠️ Capital en Riesgo de Vencimiento</span>
+                        <div class="hero-fin-val-red">${metricas['valor_en_riesgo']:,.0f} CLP</div>
+                        <div>
+                            <span class="hero-fin-badge-crit">
+                                🚨 <strong>{metricas['pct_en_riesgo']:.1f}%</strong> del Capital en Riesgo (≤ 7 días / vencido)
+                            </span>
                         </div>
-                        """
-                        st.markdown(card_html, unsafe_allow_html=True)
+                    </div>
+                </div>
+                <div class="risk-bar-container">
+                    <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:700; color:#475569; margin-bottom:6px;">
+                        <span>DISTRIBUCIÓN DEL CAPITAL POR NIVEL DE RIESGO:</span>
+                        <span>100% AUDITADO</span>
+                    </div>
+                    <div class="risk-bar">
+                        <div class="risk-bar-seg" style="width:{pct_venc:.1f}%; background:#e63946;" title="Vencidos: {pct_venc:.1f}%"></div>
+                        <div class="risk-bar-seg" style="width:{pct_crit:.1f}%; background:#f77f00;" title="Críticos: {pct_crit:.1f}%"></div>
+                        <div class="risk-bar-seg" style="width:{pct_prev:.1f}%; background:#fcbf49;" title="Preventivos: {pct_prev:.1f}%"></div>
+                        <div class="risk-bar-seg" style="width:{pct_opt:.1f}%; background:#2a9d8f;" title="Óptimos: {pct_opt:.1f}%"></div>
+                    </div>
+                    <div class="risk-legend-row">
+                        <span><strong style="color:#e63946;">🔴 Vencido:</strong> {pct_venc:.1f}% (${metricas['valor_vencidos']:,.0f})</span>
+                        <span><strong style="color:#f77f00;">🟠 Crítico:</strong> {pct_crit:.1f}% (${metricas['valor_criticos']:,.0f})</span>
+                        <span><strong style="color:#b38600;">🟡 Preventivo:</strong> {pct_prev:.1f}% (${metricas['valor_preventivos']:,.0f})</span>
+                        <span><strong style="color:#2a9d8f;">🟢 Óptimo:</strong> {pct_opt:.1f}% (${metricas['valor_optimos']:,.0f})</span>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-                with st.expander("🔍 Ver todas las recetas recomendadas para rescate de stock"):
-                    st.dataframe(
-                        df_sugeridos[[
-                            "receta", "categoria", "insumo_critico", "kg_en_riesgo", "porciones", "precio_carta", "venta_recuperable", "dias_restantes", "locales"
-                        ]],
-                        width="stretch",
-                        hide_index=True,
-                        column_config={
-                            "receta": "Plato Recomendado",
-                            "categoria": "Categoría",
-                            "insumo_critico": "Insumo Crítico",
-                            "kg_en_riesgo": st.column_config.NumberColumn("Kg en Riesgo", format="%.2f kg"),
-                            "porciones": st.column_config.NumberColumn("Platos a Elaborar", format="%d u."),
-                            "precio_carta": st.column_config.NumberColumn("Precio Carta", format="$%d"),
-                            "venta_recuperable": st.column_config.NumberColumn("Venta Potencial", format="$%d CLP"),
-                            "dias_restantes": st.column_config.NumberColumn("Días Restantes", format="%d d."),
-                            "locales": "Sucursales Afectadas",
-                        },
-                    )
+        # Tarjetas Modulares del Semáforo
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
-        st.markdown("---")
-        # Gráficos interactivos
-        col_g1, col_g2 = st.columns([1, 1.4])
-
-        with col_g1:
-            with st.container(border=True):
-                st.markdown("##### 🥧 Distribución del Semáforo")
-                resumen_alertas = inventario_df["estado_alerta"].value_counts().reset_index()
-                resumen_alertas.columns = ["Estado", "Cantidad de Lotes"]
-
-                colores_map = {
-                    "🔴 Vencido": "#e63946",
-                    "🟠 Crítico (≤ 7 días)": "#f77f00",
-                    "🟡 Preventivo (8-30 días)": "#fcbf49",
-                    "🟢 Óptimo (> 30 días)": "#2a9d8f",
-                }
-
-                donut_data = [
-                    {
-                        "name": str(row["Estado"]),
-                        "value": int(row["Cantidad de Lotes"]),
-                        "itemStyle": {"color": colores_map.get(str(row["Estado"]), "#8da9c4")},
-                    }
-                    for _, row in resumen_alertas.iterrows()
-                ]
-
-                option_donut = {
-                    "tooltip": {
-                        "trigger": "item",
-                        "formatter": "{b}<br/><b>{c} lotes</b> ({d}%)",
-                    },
-                    "legend": {
-                        "bottom": "0%",
-                        "left": "center",
-                        "icon": "circle",
-                        "textStyle": {"fontSize": 11, "color": "#475569"},
-                    },
-                    "series": [
-                        {
-                            "name": "Semáforo",
-                            "type": "pie",
-                            "radius": ["48%", "72%"],
-                            "center": ["50%", "45%"],
-                            "avoidLabelOverlap": False,
-                            "itemStyle": {
-                                "borderRadius": 6,
-                                "borderColor": "#ffffff",
-                                "borderWidth": 2,
-                            },
-                            "label": {"show": False},
-                            "emphasis": {
-                                "scale": True,
-                                "scaleSize": 5,
-                                "label": {
-                                    "show": True,
-                                    "fontSize": 14,
-                                    "fontWeight": "bold",
-                                    "formatter": "{d}%",
-                                },
-                            },
-                            "data": donut_data,
-                        }
-                    ],
-                }
-                render_echarts(option_donut, height=270, key="donut_semaforo")
-
-        with col_g2:
-            with st.container(border=True):
-                st.markdown("##### 🥩 Stock Total por Producto (kg)")
-                stock_producto = (
-                    inventario_df.groupby("producto")["cantidad"]
-                    .sum()
-                    .reset_index()
-                    .sort_values(by="cantidad", ascending=True)
-                )
-
-                option_bar = {
-                    "tooltip": {
-                        "trigger": "axis",
-                        "axisPointer": {"type": "shadow"},
-                        "formatter": "{b}: <b>{c} kg</b>",
-                    },
-                    "grid": {
-                        "left": "3%",
-                        "right": "12%",
-                        "bottom": "3%",
-                        "top": "5%",
-                        "containLabel": True,
-                    },
-                    "xAxis": {
-                        "type": "value",
-                        "axisLabel": {"formatter": "{value} kg"},
-                        "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
-                    },
-                    "yAxis": {
-                        "type": "category",
-                        "data": [str(p) for p in stock_producto["producto"].tolist()],
-                        "axisLine": {"lineStyle": {"color": "#94a3b8"}},
-                        "axisLabel": {"color": "#334155", "fontSize": 11},
-                    },
-                    "series": [
-                        {
-                            "name": "Stock Total",
-                            "type": "bar",
-                            "data": [round(float(c), 1) for c in stock_producto["cantidad"].tolist()],
-                            "itemStyle": {
-                                "borderRadius": [0, 6, 6, 0],
-                                "color": {
-                                    "type": "linear",
-                                    "x": 0,
-                                    "y": 0,
-                                    "x2": 1,
-                                    "y2": 0,
-                                    "colorStops": [
-                                        {"offset": 0, "color": "#0d2b45"},
-                                        {"offset": 1, "color": "#00b4d8"},
-                                    ],
-                                },
-                            },
-                            "label": {
-                                "show": True,
-                                "position": "right",
-                                "formatter": "{c} kg",
-                                "color": "#0f172a",
-                                "fontWeight": "bold",
-                                "fontSize": 11,
-                            },
-                        }
-                    ],
-                }
-                render_echarts(option_bar, height=270, key="bar_stock")
-
-        # Matriz de Dispersión Riesgo vs Capital
-        with st.container(border=True):
-            st.markdown("##### 🎯 Matriz de Dispersión: Riesgo Temporal vs Capital Inmovilizado por Lote")
-            st.caption(
-                "Mapeo forense de cada lote físico en inventario. Las partidas ubicadas en el **cuadrante superior izquierdo** "
-                "(alta valorización monetaria y pocos días de vida útil) representan el foco de alerta inmediata para la dirección."
+        with kpi_col1:
+            st.markdown(
+                f"""
+                <div class="semaforo-card" style="border-top: 5px solid #e63946;">
+                    <div class="semaforo-header" style="color: #e63946;">🔴 Vencidos</div>
+                    <div class="semaforo-num-flex">
+                        <span class="semaforo-num" style="color: #e63946;">{metricas['vencidos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                        <span class="semaforo-monto-pill" style="background:#fee2e2; color:#b91c1c;">${metricas['valor_vencidos']:,.0f}</span>
+                    </div>
+                    <div class="semaforo-sub">Caducados (Acción inmediata)</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            if HAS_PLOTLY:
-                fig_scatter = px.scatter(
-                    inventario_df,
-                    x="dias_para_vencer",
-                    y="valor_inventario",
-                    size="cantidad",
-                    color="estado_alerta",
-                    hover_name="producto",
-                    hover_data={
-                        "local": True,
-                        "codigo_lote_proveedor": True,
-                        "fecha_vencimiento": True,
-                        "cantidad": ":.2f",
-                        "costo_unitario": ":$,.0f",
-                        "valor_inventario": ":$,.0f",
-                        "dias_para_vencer": True,
-                        "estado_alerta": False,
-                    },
-                    color_discrete_map={
+
+        with kpi_col2:
+            st.markdown(
+                f"""
+                <div class="semaforo-card" style="border-top: 5px solid #f77f00;">
+                    <div class="semaforo-header" style="color: #c2410c;">🟠 Crítico (≤ 7 d)</div>
+                    <div class="semaforo-num-flex">
+                        <span class="semaforo-num" style="color: #f77f00;">{metricas['criticos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                        <span class="semaforo-monto-pill" style="background:#ffedd5; color:#c2410c;">${metricas['valor_criticos']:,.0f}</span>
+                    </div>
+                    <div class="semaforo-sub">Prioridad máxima en cocina</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with kpi_col3:
+            st.markdown(
+                f"""
+                <div class="semaforo-card" style="border-top: 5px solid #e0a912;">
+                    <div class="semaforo-header" style="color: #a16207;">🟡 Preventivo (8-30 d)</div>
+                    <div class="semaforo-num-flex">
+                        <span class="semaforo-num" style="color: #d97706;">{metricas['preventivos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                        <span class="semaforo-monto-pill" style="background:#fef3c7; color:#92400e;">${metricas['valor_preventivos']:,.0f}</span>
+                    </div>
+                    <div class="semaforo-sub">En observación y rotación regular</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with kpi_col4:
+            st.markdown(
+                f"""
+                <div class="semaforo-card" style="border-top: 5px solid #2a9d8f;">
+                    <div class="semaforo-header" style="color: #15803d;">🟢 Óptimo (> 30 d)</div>
+                    <div class="semaforo-num-flex">
+                        <span class="semaforo-num" style="color: #2a9d8f;">{metricas['optimos']} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">lotes</span></span>
+                        <span class="semaforo-monto-pill" style="background:#dcfce7; color:#15803d;">${metricas['valor_optimos']:,.0f}</span>
+                    </div>
+                    <div class="semaforo-sub">Vida útil segura y holgada</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # Fila: KPIs de Gestión y Control Operativo
+        total_val_inv = float(inventario_df["valor_inventario"].sum()) if not inventario_df.empty else 0.0
+        potencial_facturacion = total_val_inv * 3.2
+        lotes_haccp_ok = len(inventario_df[inventario_df["temperatura_recepcion"] <= 4.0]) if not inventario_df.empty else 0
+        total_lotes_inv = len(inventario_df) if not inventario_df.empty else 1
+        pct_haccp = (lotes_haccp_ok / total_lotes_inv * 100)
+        dias_vida_pond = (
+            float((inventario_df["dias_para_vencer"] * inventario_df["valor_inventario"]).sum() / total_val_inv)
+            if total_val_inv > 0
+            else 0.0
+        )
+        total_kg_stock = float(inventario_df["cantidad"].sum()) if not inventario_df.empty else 0.0
+        porciones_totales_estimadas = int(total_kg_stock / 0.220) if total_kg_stock > 0 else 0
+
+        col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
+
+        with col_ex1:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-head">
+                        <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #10b981 0%, #059669 100%); color:#ffffff;">💵</div>
+                        <span class="op-kpi-title">Potencial Facturación Carta</span>
+                    </div>
+                    <div class="op-kpi-val">${potencial_facturacion:,.0f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">CLP</span></div>
+                    <div>
+                        <span class="op-kpi-tag" style="background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">
+                            ↑ Factor 3.2× Costo (Gastro)
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_ex2:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-head">
+                        <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #0284c7 0%, #0369a1 100%); color:#ffffff;">🛡️</div>
+                        <span class="op-kpi-title">Inocuidad HACCP (≤ 4°C)</span>
+                    </div>
+                    <div class="op-kpi-val">{pct_haccp:.1f}%</div>
+                    <div>
+                        <span class="op-kpi-tag" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd;">
+                            ↑ {lotes_haccp_ok}/{total_lotes_inv} lotes seguros
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_ex3:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-head">
+                        <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color:#ffffff;">⏳</div>
+                        <span class="op-kpi-title">Vida Útil Ponderada</span>
+                    </div>
+                    <div class="op-kpi-val">{dias_vida_pond:.1f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">días</span></div>
+                    <div>
+                        <span class="op-kpi-tag" style="background:#fefce8; color:#a16207; border:1px solid #fef08a;">
+                            Ponderado por capital
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_ex4:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-head">
+                        <div class="op-kpi-icon-box" style="background:linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color:#ffffff;">🍽️</div>
+                        <span class="op-kpi-title">Capacidad de Comandas</span>
+                    </div>
+                    <div class="op-kpi-val">{porciones_totales_estimadas:,} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">platos</span></div>
+                    <div>
+                        <span class="op-kpi-tag" style="background:#eef2ff; color:#4338ca; border:1px solid #c7d2fe;">
+                            ↑ {total_kg_stock:.1f} kg activos
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if inventario_df.empty:
+            st.info("ℹ️ No hay existencias registradas para el local seleccionado.")
+        else:
+            st.markdown("---")
+            # Gráficos interactivos
+            col_g1, col_g2 = st.columns([1, 1.4])
+
+            with col_g1:
+                with st.container(border=True):
+                    st.markdown("##### 🥧 Distribución del Semáforo")
+                    resumen_alertas = inventario_df["estado_alerta"].value_counts().reset_index()
+                    resumen_alertas.columns = ["Estado", "Cantidad de Lotes"]
+
+                    colores_map = {
                         "🔴 Vencido": "#e63946",
                         "🟠 Crítico (≤ 7 días)": "#f77f00",
                         "🟡 Preventivo (8-30 días)": "#fcbf49",
                         "🟢 Óptimo (> 30 días)": "#2a9d8f",
-                    },
-                    labels={
-                        "dias_para_vencer": "Días Restantes de Vida Útil",
-                        "valor_inventario": "Capital Inmovilizado ($CLP)",
-                        "estado_alerta": "Nivel de Alerta",
-                        "cantidad": "Kilos en Lote",
-                    },
-                )
-                fig_scatter.add_vline(
-                    x=7,
-                    line_width=2,
-                    line_dash="dash",
-                    line_color="#e63946",
-                    annotation_text="Límite Crítico (≤ 7 días)",
-                    annotation_position="top left",
-                )
-                fig_scatter.update_layout(
-                    margin=dict(t=25, b=10, l=10, r=10),
-                    height=330,
-                    yaxis=dict(tickformat="$,.0f"),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
-                st.plotly_chart(fig_scatter, width="stretch")
-            else:
-                st.dataframe(inventario_df[["producto", "local", "dias_para_vencer", "valor_inventario"]])
+                    }
 
-        # Gráfica de Riesgo de Venta y Exposición por Local
-        st.markdown("---")
-        st.markdown("#### 🏢 Exposición y Riesgo de Venta por Sucursal")
-        st.caption(
-            "Análisis comparativo de los 5 locales. Identifica qué sucursales concentran el mayor "
-            "capital inmovilizado en riesgo de caducidad para coordinar traspasos preventivos o promociones comerciales."
-        )
-
-        col_rv1, col_rv2 = st.columns([1.7, 1.1])
-
-        df_todas_sucursales = _c_inventario_alertas(id_local=None)
-
-        with col_rv1:
-            with st.container(border=True):
-                st.markdown("##### 📊 Valor de Inventario por Local según Nivel de Riesgo")
-                df_chart_loc = (
-                    df_todas_sucursales.groupby(["local", "estado_alerta", "severidad_alerta"])[
-                        "valor_inventario"
+                    donut_data = [
+                        {
+                            "name": str(row["Estado"]),
+                            "value": int(row["Cantidad de Lotes"]),
+                            "itemStyle": {"color": colores_map.get(str(row["Estado"]), "#8da9c4")},
+                        }
+                        for _, row in resumen_alertas.iterrows()
                     ]
-                    .sum()
+
+                    option_donut = {
+                        "tooltip": {
+                            "trigger": "item",
+                            "formatter": "{b}<br/><b>{c} lotes</b> ({d}%)",
+                        },
+                        "legend": {
+                            "bottom": "0%",
+                            "left": "center",
+                            "icon": "circle",
+                            "textStyle": {"fontSize": 11, "color": "#475569"},
+                        },
+                        "series": [
+                            {
+                                "name": "Semáforo",
+                                "type": "pie",
+                                "radius": ["48%", "72%"],
+                                "center": ["50%", "45%"],
+                                "avoidLabelOverlap": False,
+                                "itemStyle": {
+                                    "borderRadius": 6,
+                                    "borderColor": "#ffffff",
+                                    "borderWidth": 2,
+                                },
+                                "label": {"show": False},
+                                "emphasis": {
+                                    "scale": True,
+                                    "scaleSize": 5,
+                                    "label": {
+                                        "show": True,
+                                        "fontSize": 14,
+                                        "fontWeight": "bold",
+                                        "formatter": "{d}%",
+                                    },
+                                },
+                                "data": donut_data,
+                            }
+                        ],
+                    }
+                    render_echarts(option_donut, height=270, key="donut_semaforo")
+
+            with col_g2:
+                with st.container(border=True):
+                    st.markdown("##### 🥩 Stock Total por Producto (kg)")
+                    stock_producto = (
+                        inventario_df.groupby("producto")["cantidad"]
+                        .sum()
+                        .reset_index()
+                        .sort_values(by="cantidad", ascending=True)
+                    )
+
+                    option_bar = {
+                        "tooltip": {
+                            "trigger": "axis",
+                            "axisPointer": {"type": "shadow"},
+                            "formatter": "{b}: <b>{c} kg</b>",
+                        },
+                        "grid": {
+                            "left": "3%",
+                            "right": "12%",
+                            "bottom": "3%",
+                            "top": "5%",
+                            "containLabel": True,
+                        },
+                        "xAxis": {
+                            "type": "value",
+                            "axisLabel": {"formatter": "{value} kg"},
+                            "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                        },
+                        "yAxis": {
+                            "type": "category",
+                            "data": [str(p) for p in stock_producto["producto"].tolist()],
+                            "axisLine": {"lineStyle": {"color": "#94a3b8"}},
+                            "axisLabel": {"color": "#334155", "fontSize": 11},
+                        },
+                        "series": [
+                            {
+                                "name": "Stock Total",
+                                "type": "bar",
+                                "data": [round(float(c), 1) for c in stock_producto["cantidad"].tolist()],
+                                "itemStyle": {
+                                    "borderRadius": [0, 6, 6, 0],
+                                    "color": {
+                                        "type": "linear",
+                                        "x": 0,
+                                        "y": 0,
+                                        "x2": 1,
+                                        "y2": 0,
+                                        "colorStops": [
+                                            {"offset": 0, "color": "#0d2b45"},
+                                            {"offset": 1, "color": "#00b4d8"},
+                                        ],
+                                    },
+                                },
+                                "label": {
+                                    "show": True,
+                                    "position": "right",
+                                    "formatter": "{c} kg",
+                                    "color": "#0f172a",
+                                    "fontWeight": "bold",
+                                    "fontSize": 11,
+                                },
+                            }
+                        ],
+                    }
+                    render_echarts(option_bar, height=270, key="bar_stock")
+
+            # Gráfica de Riesgo de Venta y Exposición por Local
+            st.markdown("---")
+            st.markdown("#### 🏢 Exposición y Riesgo de Venta por Sucursal")
+            st.caption(
+                "Análisis comparativo de los 5 locales. Identifica qué sucursales concentran el mayor "
+                "capital inmovilizado en riesgo de caducidad para coordinar traspasos preventivos o promociones comerciales."
+            )
+
+            col_rv1, col_rv2 = st.columns([1.7, 1.1])
+
+            df_todas_sucursales = _c_inventario_alertas(id_local=None)
+
+            with col_rv1:
+                with st.container(border=True):
+                    st.markdown("##### 📊 Valor de Inventario por Local según Nivel de Riesgo")
+                    df_chart_loc = (
+                        df_todas_sucursales.groupby(["local", "estado_alerta", "severidad_alerta"])[
+                            "valor_inventario"
+                        ]
+                        .sum()
+                        .reset_index()
+                    )
+                    df_chart_loc = df_chart_loc.sort_values(by="severidad_alerta")
+
+                    locales_unicos = df_todas_sucursales["local"].unique().tolist()
+                    estados_orden = [
+                        "🔴 Vencido",
+                        "🟠 Crítico (≤ 7 días)",
+                        "🟡 Preventivo (8-30 días)",
+                        "🟢 Óptimo (> 30 días)",
+                    ]
+
+                    colores_riesgo = {
+                        "🔴 Vencido": "#e63946",
+                        "🟠 Crítico (≤ 7 días)": "#f77f00",
+                        "🟡 Preventivo (8-30 días)": "#fcbf49",
+                        "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                    }
+
+                    series_list = []
+                    for est in estados_orden:
+                        sub = df_chart_loc[df_chart_loc["estado_alerta"] == est]
+                        mapa_monto = dict(zip(sub["local"], sub["valor_inventario"]))
+                        data_vals = [float(mapa_monto.get(loc, 0)) for loc in locales_unicos]
+                        series_list.append({
+                            "name": est,
+                            "type": "bar",
+                            "stack": "riesgo",
+                            "data": data_vals,
+                            "itemStyle": {"color": colores_riesgo.get(est, "#94a3b8")},
+                        })
+
+                    option_sucursales = {
+                        "tooltip": {
+                            "trigger": "axis",
+                            "axisPointer": {"type": "shadow"},
+                        },
+                        "legend": {
+                            "top": "0%",
+                            "left": "center",
+                            "icon": "circle",
+                            "textStyle": {"fontSize": 11, "color": "#475569"},
+                        },
+                        "grid": {
+                            "left": "3%",
+                            "right": "4%",
+                            "bottom": "5%",
+                            "top": "16%",
+                            "containLabel": True,
+                        },
+                        "xAxis": {
+                            "type": "category",
+                            "data": locales_unicos,
+                            "axisLabel": {"interval": 0, "rotate": 10, "color": "#334155", "fontSize": 11},
+                        },
+                        "yAxis": {
+                            "type": "value",
+                            "axisLabel": {
+                                "formatter": "${value}",
+                            },
+                            "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                        },
+                        "series": series_list,
+                    }
+                    render_echarts(option_sucursales, height=290, key="sucursales_riesgo")
+
+            with col_rv2:
+                with st.container(border=True):
+                    st.markdown("##### 🎯 Diagnóstico Ejecutivo de Riesgo")
+                    tot_por_local = df_todas_sucursales.groupby("local")["valor_inventario"].sum()
+                    rsk_por_local = df_todas_sucursales[df_todas_sucursales["severidad_alerta"] <= 2].groupby("local")["valor_inventario"].sum()
+
+                    df_ranking = pd.DataFrame({
+                        "Total ($)": tot_por_local,
+                        "Riesgo ($)": rsk_por_local,
+                    }).fillna(0)
+                    df_ranking["% Riesgo"] = (df_ranking["Riesgo ($)"] / df_ranking["Total ($)"] * 100).fillna(0)
+                    df_ranking = df_ranking.sort_values(by="Riesgo ($)", ascending=False)
+
+                    peor_local = df_ranking.index[0]
+                    peor_monto_riesgo = df_ranking.iloc[0]["Riesgo ($)"]
+                    peor_pct = df_ranking.iloc[0]["% Riesgo"]
+                    venta_riesgo_estimada = peor_monto_riesgo * 3.0
+
+                    st.markdown(
+                        f"""
+                        <div style="background:#fff5f5; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; margin-bottom:10px;">
+                            <span style="font-size:0.75rem; font-weight:700; color:#991b1b; text-transform:uppercase;">Sucursal con Mayor Exposición</span>
+                            <div style="font-size:1.15rem; font-weight:700; color:#b91c1c;">{peor_local}</div>
+                            • <strong>Costo en riesgo:</strong> ${peor_monto_riesgo:,.0f} CLP ({peor_pct:.1f}% de su stock)<br>
+                            • <strong>Venta potencial en riesgo:</strong> <span style="color:#b91c1c; font-weight:700;">${venta_riesgo_estimada:,.0f} CLP</span> (Factor 3×)
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    st.markdown("###### Ranking de Exposición por Local:")
+                    for loc_nombre, fila_rk in df_ranking.iterrows():
+                        rsk_val = fila_rk["Riesgo ($)"]
+                        pct_val = fila_rk["% Riesgo"]
+                        icono_sem = "🔴" if pct_val > 20 else ("🟠" if pct_val > 0 else "🟢")
+                        st.write(f"{icono_sem} **{loc_nombre}**: ${rsk_val:,.0f} CLP *({pct_val:.1f}% en riesgo)*")
+
+    # --------------------------------------------------------------------------
+    # SUB-TAB B: OPORTUNIDADES & RESCATE EN CARTA (PLAN DE CHOQUE)
+    # --------------------------------------------------------------------------
+    elif sub_tab_alerta == "oportunidades":
+        if inventario_df.empty:
+            st.info("ℹ️ No hay existencias registradas para el local seleccionado.")
+        else:
+            st.markdown("#### 🍲 Top Preparaciones Recomendadas para la Carta del Día (Rescate de Insumos)")
+            st.caption(
+                "Cruce algorítmico entre materias primas en zona crítica y las fichas técnicas de Mamá Qocha. "
+                "Permite al chef y al administrador activar 'Sugerencias del Día' para monetizar el stock antes de que venza."
+            )
+
+            recetas_activas_df = _c_recetas(solo_activas=True)
+            lotes_urgentes = inventario_df[(inventario_df["dias_para_vencer"] >= 0) & (inventario_df["dias_para_vencer"] <= 7)]
+
+            if lotes_urgentes.empty:
+                st.success("✅ **Excelente estado operativo:** No se detectan insumos en riesgo crítico (≤ 7 días). Todo el inventario se encuentra en rango preventivo u óptimo.")
+            elif recetas_activas_df.empty:
+                st.info("No hay recetas activas registradas en el catálogo maestro.")
+            else:
+                insumos_urg_resumen = (
+                    lotes_urgentes.groupby(["id_producto", "producto"])
+                    .agg(
+                        kg_urgentes=("cantidad", "sum"),
+                        min_dias=("dias_para_vencer", "min"),
+                        locales=("local", lambda x: ", ".join(sorted(x.unique()))),
+                        valor_riesgo=("valor_inventario", "sum"),
+                    )
                     .reset_index()
                 )
-                df_chart_loc = df_chart_loc.sort_values(by="severidad_alerta")
 
-                locales_unicos = df_todas_sucursales["local"].unique().tolist()
-                estados_orden = [
-                    "🔴 Vencido",
-                    "🟠 Crítico (≤ 7 días)",
-                    "🟡 Preventivo (8-30 días)",
-                    "🟢 Óptimo (> 30 días)",
-                ]
+                platos_sugeridos = []
+                for _, ins_row in insumos_urg_resumen.iterrows():
+                    id_prod = ins_row["id_producto"]
+                    nom_prod = ins_row["producto"]
+                    kg_disp = float(ins_row["kg_urgentes"])
+                    min_d = int(ins_row["min_dias"])
+                    locs_str = ins_row["locales"]
+                    val_rsk = float(ins_row["valor_riesgo"])
 
-                colores_riesgo = {
-                    "🔴 Vencido": "#e63946",
-                    "🟠 Crítico (≤ 7 días)": "#f77f00",
-                    "🟡 Preventivo (8-30 días)": "#fcbf49",
-                    "🟢 Óptimo (> 30 días)": "#2a9d8f",
-                }
+                    recetas_asoc = recetas_activas_df[recetas_activas_df["id_producto"] == id_prod]
+                    for _, rec_row in recetas_asoc.iterrows():
+                        kg_por_plato = float(rec_row["cantidad_kg"])
+                        if kg_por_plato > 0:
+                            platos_posibles = int(kg_disp / kg_por_plato)
+                            if platos_posibles > 0:
+                                precio_vta = float(rec_row["precio_venta"])
+                                venta_recup = platos_posibles * precio_vta
+                                platos_sugeridos.append({
+                                    "receta": rec_row["receta"],
+                                    "categoria": rec_row["categoria"],
+                                    "insumo_critico": nom_prod,
+                                    "kg_en_riesgo": kg_disp,
+                                    "porciones": platos_posibles,
+                                    "precio_carta": precio_vta,
+                                    "venta_recuperable": venta_recup,
+                                    "dias_restantes": min_d,
+                                    "locales": locs_str,
+                                    "costo_riesgo": val_rsk,
+                                })
 
-                series_list = []
-                for est in estados_orden:
-                    sub = df_chart_loc[df_chart_loc["estado_alerta"] == est]
-                    mapa_monto = dict(zip(sub["local"], sub["valor_inventario"]))
-                    data_vals = [float(mapa_monto.get(loc, 0)) for loc in locales_unicos]
-                    series_list.append({
-                        "name": est,
-                        "type": "bar",
-                        "stack": "riesgo",
-                        "data": data_vals,
-                        "itemStyle": {"color": colores_riesgo.get(est, "#94a3b8")},
-                    })
+                df_sugeridos = pd.DataFrame(platos_sugeridos)
+                if df_sugeridos.empty:
+                    st.warning("Hay materias primas críticas pero no están vinculadas a recetas activas.")
+                else:
+                    df_sugeridos = df_sugeridos.sort_values(by=["dias_restantes", "venta_recuperable"], ascending=[True, False])
+                    venta_total_rescatable = df_sugeridos["venta_recuperable"].sum()
 
-                option_sucursales = {
-                    "tooltip": {
-                        "trigger": "axis",
-                        "axisPointer": {"type": "shadow"},
-                    },
-                    "legend": {
-                        "top": "0%",
-                        "left": "center",
-                        "icon": "circle",
-                        "textStyle": {"fontSize": 11, "color": "#475569"},
-                    },
-                    "grid": {
-                        "left": "3%",
-                        "right": "4%",
-                        "bottom": "5%",
-                        "top": "16%",
-                        "containLabel": True,
-                    },
-                    "xAxis": {
-                        "type": "category",
-                        "data": locales_unicos,
-                        "axisLabel": {"interval": 0, "rotate": 10, "color": "#334155", "fontSize": 11},
-                    },
-                    "yAxis": {
-                        "type": "value",
-                        "axisLabel": {
-                            "formatter": "${value}",
-                        },
-                        "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
-                    },
-                    "series": series_list,
-                }
-                render_echarts(option_sucursales, height=290, key="sucursales_riesgo")
+                    st.markdown(
+                        f"""
+                        <div style="background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 100%); border: 1px solid #fde68a; border-left: 6px solid #f59e0b; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px;">
+                            <strong style="color: #92400e; font-size: 1.05rem;">🎯 Oportunidad Comercial: Plan de Choque en Cocina</strong><br>
+                            <span style="color: #78350f; font-size: 0.9rem;">
+                                Se detectaron <strong>{len(insumos_urg_resumen)} materias primas críticas</strong> próximas a vencer. Al priorizar estos platos en la carta o menú de turno, 
+                                la cadena puede transformar hasta <strong style="color: #b45309; font-size: 1.05rem;">${venta_total_rescatable:,.0f} CLP</strong> en ventas efectivas, evitando mermas operativas.
+                            </span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-        with col_rv2:
+                    top_platos = df_sugeridos.head(3)
+                    cols_top = st.columns(len(top_platos))
+                    for idx, (_, p_fila) in enumerate(top_platos.iterrows()):
+                        with cols_top[idx]:
+                            receta = p_fila["receta"]
+                            receta_lower = receta.lower()
+                            if any(k in receta_lower for k in ["lomo", "carne", "res"]):
+                                icono = "🥩"
+                                color_grad = "linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)"
+                            elif any(k in receta_lower for k in ["gallina", "pollo", "ave"]):
+                                icono = "🍗"
+                                color_grad = "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)"
+                            elif any(k in receta_lower for k in ["ceviche", "pescado", "reineta", "salmon", "marisco", "pulpo"]):
+                                icono = "🐟"
+                                color_grad = "linear-gradient(135deg, #06b6d4 0%, #0284c7 100%)"
+                            elif any(k in receta_lower for k in ["arroz", "chaufa"]):
+                                icono = "🍚"
+                                color_grad = "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                            else:
+                                icono = "🍽️"
+                                color_grad = "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
+
+                            dias = int(p_fila["dias_restantes"])
+                            if dias <= 0:
+                                badge_html = '<span class="recipe-urg-critico">🔴 Vence Hoy</span>'
+                                color_borde_top = "#ef4444"
+                            elif dias <= 2:
+                                badge_html = f'<span class="recipe-urg-critico">🔴 Urgente ({dias}d)</span>'
+                                color_borde_top = "#ef4444"
+                            else:
+                                badge_html = f'<span class="recipe-urg-alta">🟠 Prioridad ({dias}d)</span>'
+                                color_borde_top = "#f59e0b"
+
+                            card_html = f"""
+                            <div class="recipe-card" style="border-top: 5px solid {color_borde_top};">
+                                <div class="recipe-card-top">
+                                    <span class="recipe-cat-badge">{p_fila['categoria']}</span>
+                                    {badge_html}
+                                </div>
+                                <div class="recipe-header-flex">
+                                    <div class="recipe-avatar" style="background: {color_grad};">{icono}</div>
+                                    <div style="flex: 1; min-width: 0;">
+                                        <div class="recipe-title" title="{receta}">{receta}</div>
+                                        <div class="recipe-carta">Carta: <strong>${p_fila['precio_carta']:,.0f}</strong></div>
+                                    </div>
+                                </div>
+                                <div class="recipe-kpi-banner">
+                                    <div>
+                                        <div class="recipe-kpi-num">{int(p_fila['porciones'])} <span style="font-size:0.85rem; font-weight:600;">platos</span></div>
+                                        <div class="recipe-kpi-sub">Porciones Sugeridas</div>
+                                    </div>
+                                    <div style="text-align: right;">
+                                        <div class="recipe-kpi-gain">+${p_fila['venta_recuperable']:,.0f}</div>
+                                        <div class="recipe-kpi-sub">Venta Recuperable</div>
+                                    </div>
+                                </div>
+                                <div class="recipe-meta-list">
+                                    <div class="recipe-meta-item">
+                                        <span style="color:#64748b;">⚠️ Insumo Crítico:</span>
+                                        <strong>{p_fila['kg_en_riesgo']:.1f} kg {p_fila['insumo_critico']}</strong>
+                                    </div>
+                                    <div class="recipe-meta-item">
+                                        <span style="color:#64748b;">📍 Sucursales:</span>
+                                        <span style="font-weight:600; font-size:0.76rem;">{p_fila['locales']}</span>
+                                    </div>
+                                </div>
+                                <div class="recipe-footer-callout">
+                                    💡 <strong>Sugerencia Chef:</strong> Ofrecer como especial de turno o promo 2×1.
+                                </div>
+                            </div>
+                            """
+                            st.markdown(card_html, unsafe_allow_html=True)
+
+                    with st.expander("🔍 Ver todas las recetas recomendadas para rescate de stock"):
+                        st.dataframe(
+                            df_sugeridos[[
+                                "receta", "categoria", "insumo_critico", "kg_en_riesgo", "porciones", "precio_carta", "venta_recuperable", "dias_restantes", "locales"
+                            ]],
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "receta": "Plato Recomendado",
+                                "categoria": "Categoría",
+                                "insumo_critico": "Insumo Crítico",
+                                "kg_en_riesgo": st.column_config.NumberColumn("Kg en Riesgo", format="%.2f kg"),
+                                "porciones": st.column_config.NumberColumn("Platos a Elaborar", format="%d u."),
+                                "precio_carta": st.column_config.NumberColumn("Precio Carta", format="$%d"),
+                                "venta_recuperable": st.column_config.NumberColumn("Venta Potencial", format="$%d CLP"),
+                                "dias_restantes": st.column_config.NumberColumn("Días Restantes", format="%d d."),
+                                "locales": "Sucursales Afectadas",
+                            },
+                        )
+
+            # Matriz de Dispersión Riesgo vs Capital
+            st.markdown("---")
             with st.container(border=True):
-                st.markdown("##### 🎯 Diagnóstico Ejecutivo de Riesgo")
-                tot_por_local = df_todas_sucursales.groupby("local")["valor_inventario"].sum()
-                rsk_por_local = df_todas_sucursales[df_todas_sucursales["severidad_alerta"] <= 2].groupby("local")["valor_inventario"].sum()
-
-                df_ranking = pd.DataFrame({
-                    "Total ($)": tot_por_local,
-                    "Riesgo ($)": rsk_por_local,
-                }).fillna(0)
-                df_ranking["% Riesgo"] = (df_ranking["Riesgo ($)"] / df_ranking["Total ($)"] * 100).fillna(0)
-                df_ranking = df_ranking.sort_values(by="Riesgo ($)", ascending=False)
-
-                peor_local = df_ranking.index[0]
-                peor_monto_riesgo = df_ranking.iloc[0]["Riesgo ($)"]
-                peor_pct = df_ranking.iloc[0]["% Riesgo"]
-                venta_riesgo_estimada = peor_monto_riesgo * 3.0
-
-                st.markdown(
-                    f"""
-                    <div style="background:#fff5f5; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; margin-bottom:10px;">
-                        <span style="font-size:0.75rem; font-weight:700; color:#991b1b; text-transform:uppercase;">Sucursal con Mayor Exposición</span>
-                        <div style="font-size:1.15rem; font-weight:700; color:#b91c1c;">{peor_local}</div>
-                        • <strong>Costo en riesgo:</strong> ${peor_monto_riesgo:,.0f} CLP ({peor_pct:.1f}% de su stock)<br>
-                        • <strong>Venta potencial en riesgo:</strong> <span style="color:#b91c1c; font-weight:700;">${venta_riesgo_estimada:,.0f} CLP</span> (Factor 3×)
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                st.markdown("##### 🎯 Matriz de Dispersión: Riesgo Temporal vs Capital Inmovilizado por Lote")
+                st.caption(
+                    "Mapeo forense de cada lote físico en inventario. Las partidas ubicadas en el **cuadrante superior izquierdo** "
+                    "(alta valorización monetaria y pocos días de vida útil) representan el foco de alerta inmediata para la dirección."
                 )
+                if HAS_PLOTLY:
+                    fig_scatter = px.scatter(
+                        inventario_df,
+                        x="dias_para_vencer",
+                        y="valor_inventario",
+                        size="cantidad",
+                        color="estado_alerta",
+                        hover_name="producto",
+                        hover_data={
+                            "local": True,
+                            "codigo_lote_proveedor": True,
+                            "fecha_vencimiento": True,
+                            "cantidad": ":.2f",
+                            "costo_unitario": ":$,.0f",
+                            "valor_inventario": ":$,.0f",
+                            "dias_para_vencer": True,
+                            "estado_alerta": False,
+                        },
+                        color_discrete_map={
+                            "🔴 Vencido": "#e63946",
+                            "🟠 Crítico (≤ 7 días)": "#f77f00",
+                            "🟡 Preventivo (8-30 días)": "#fcbf49",
+                            "🟢 Óptimo (> 30 días)": "#2a9d8f",
+                        },
+                        labels={
+                            "dias_para_vencer": "Días Restantes de Vida Útil",
+                            "valor_inventario": "Capital Inmovilizado ($CLP)",
+                            "estado_alerta": "Nivel de Alerta",
+                            "cantidad": "Kilos en Lote",
+                        },
+                    )
+                    fig_scatter.add_vline(
+                        x=7,
+                        line_width=2,
+                        line_dash="dash",
+                        line_color="#e63946",
+                        annotation_text="Límite Crítico (≤ 7 días)",
+                        annotation_position="top left",
+                    )
+                    fig_scatter.update_layout(
+                        margin=dict(t=25, b=10, l=10, r=10),
+                        height=330,
+                        yaxis=dict(tickformat="$,.0f"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(fig_scatter, width="stretch")
+                else:
+                    st.dataframe(inventario_df[["producto", "local", "dias_para_vencer", "valor_inventario"]])
 
-                st.markdown("###### Ranking de Exposición por Local:")
-                for loc_nombre, fila_rk in df_ranking.iterrows():
-                    rsk_val = fila_rk["Riesgo ($)"]
-                    pct_val = fila_rk["% Riesgo"]
-                    icono_sem = "🔴" if pct_val > 20 else ("🟠" if pct_val > 0 else "🟢")
-                    st.write(f"{icono_sem} **{loc_nombre}**: ${rsk_val:,.0f} CLP *({pct_val:.1f}% en riesgo)*")
-
-        # Módulo de Traspasos Preventivos Sugeridos (Rebalanceo Logístico)
-        if id_local_activo is None:
+            # Módulo de Traspasos Preventivos Sugeridos (Rebalanceo Logístico)
+            st.markdown("---")
+            df_todas_sucursales = _c_inventario_alertas(id_local=None)
             with st.container(border=True):
                 st.markdown("##### 🚚 Oportunidades de Rebalanceo Logístico (Traspasos Preventivos Sugeridos)")
                 st.caption(
@@ -2903,100 +3052,16 @@ if nav_tab == "alertas":
                 else:
                     st.info("✅ No se detectan desequilibrios críticos de inventario entre sucursales.")
 
-        st.markdown("---")
-
-        # Filtros y tabla interactiva
-        st.markdown("#### 📋 Detalle de Lotes en Stock")
-        col_filtro1, col_filtro2 = st.columns([1, 2])
-        with col_filtro1:
-            OPC_FILTRO_ALERTA = {
-                "Todos los niveles": "🌐 Todos",
-                "🔴 Vencido": "🔴 Vencido",
-                "🟠 Crítico (≤ 7 días)": "🟠 Crítico (≤7d)",
-                "🟡 Preventivo (8-30 días)": "🟡 Preventivo (8-30d)",
-                "🟢 Óptimo (> 30 días)": "🟢 Óptimo (>30d)",
-            }
-            filtro_alerta = _select_pills(
-                "Filtrar por nivel de riesgo:",
-                OPC_FILTRO_ALERTA,
-                key="pill_filtro_alerta",
-                default_key="Todos los niveles",
-            )
-        with col_filtro2:
-            filtro_busqueda = st.text_input(
-                "Buscar por producto, proveedor o código de lote:",
-                placeholder="Ej. Atún, Vacuno Demo, L-2026...",
-            )
-
-        datos_filtrados = inventario_df.copy()
-        if filtro_alerta != "Todos los niveles":
-            datos_filtrados = datos_filtrados[datos_filtrados["estado_alerta"] == filtro_alerta]
-
-        if filtro_busqueda.strip():
-            patron = filtro_busqueda.strip().lower()
-            datos_filtrados = datos_filtrados[
-                datos_filtrados["producto"].str.lower().str.contains(patron)
-                | datos_filtrados["codigo_lote_proveedor"].str.lower().str.contains(patron)
-                | datos_filtrados["proveedor"].str.lower().str.contains(patron)
-            ]
-
-        # Alerta visual de criticidad
-        criticos_totales = datos_filtrados[datos_filtrados["severidad_alerta"] <= 2]
-        if not criticos_totales.empty:
-            st.warning(
-                f"⚠️ Hay **{len(criticos_totales)} lotes prioritarios** (vencidos o críticos). "
-                "Recuerda priorizar su despacho aplicando la recomendación de orden FEFO."
-            )
-
-        columnas_mostrar = [
-            "estado_alerta",
-            "dias_para_vencer",
-            "fecha_vencimiento",
-            "producto",
-            "codigo_lote_proveedor",
-            "temperatura_recepcion",
-            "cantidad",
-            "unidad_medida",
-            "costo_unitario",
-            "valor_inventario",
-            "local",
-            "proveedor",
-            "documento_compra",
-        ]
-
-        # Asegurar columnas requeridas para evitar errores de caché en caliente
-        for col_req, val_defecto in [
-            ("temperatura_recepcion", 2.0),
-            ("costo_unitario", 0.0),
-            ("valor_inventario", 0.0),
-        ]:
-            if col_req not in datos_filtrados.columns:
-                datos_filtrados[col_req] = val_defecto
-
-        st.dataframe(
-            datos_filtrados[columnas_mostrar],
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "estado_alerta": st.column_config.TextColumn("Alerta", width="medium"),
-                "dias_para_vencer": st.column_config.NumberColumn(
-                    "Días restantes",
-                    format="%d d",
-                    help="Días calendario hasta la fecha de expiración",
-                ),
-                "fecha_vencimiento": st.column_config.DateColumn("Vencimiento", format="YYYY-MM-DD"),
-                "producto": "Materia Prima",
-                "codigo_lote_proveedor": "Lote Proveedor",
-                "temperatura_recepcion": st.column_config.NumberColumn("Temp. Ingreso", format="%.1f °C"),
-                "cantidad": st.column_config.NumberColumn("Stock Actual", format="%.3f"),
-                "unidad_medida": "Unidad",
-                "costo_unitario": st.column_config.NumberColumn("Costo/kg", format="$%d"),
-                "valor_inventario": st.column_config.NumberColumn("Valor Stock", format="$%d"),
-                "local": "Local Físico",
-                "proveedor": "Proveedor",
-                "documento_compra": "Documento",
-            },
+    # --------------------------------------------------------------------------
+    # SUB-TAB C: AUDITORÍA Y DETALLE DE LOTES EN STOCK (FRAGMENTO REACTIVO)
+    # --------------------------------------------------------------------------
+    elif sub_tab_alerta == "lotes":
+        st.markdown("#### 📋 Detalle Forense de Lotes en Stock")
+        st.caption(
+            "Auditoría reactiva de existencias físicas por local con trazabilidad sanitaria HACCP y FEFO. "
+            "La búsqueda y los filtros operan de forma instantánea sin recargar la pantalla."
         )
+        _render_detalle_lotes_fragment(inventario_df, nombre_local_activo)
 
 # ==============================================================================
 # TAB 2: RECEPCIÓN DE COMPRAS Y GENERACIÓN DE LOTES
