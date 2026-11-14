@@ -133,6 +133,18 @@ def _generar_qr_data_uri(url: str, size: int = 150) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
+@st.cache_data(ttl=25, show_spinner=False)
+def _c_estado_conectividad_internet() -> bool:
+    """Verifica periódicamente en segundo plano si hay enlace activo con Neon/Internet."""
+    import socket
+    try:
+        s = socket.create_connection(("8.8.8.8", 53), timeout=1.2)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _c_historial_movimientos(
     id_local: Optional[int] = None,
@@ -2240,6 +2252,15 @@ nav_tab = _select_pills(
     label_visibility="collapsed",
 )
 st.markdown("<hr style='margin: 4px 0 8px 0; border-color: #e2e8f0;'>", unsafe_allow_html=True)
+
+# Alerta preventiva de contingencia: Sin conexión a Neon Cloud
+if not _c_estado_conectividad_internet():
+    st.warning(
+        "⚠️ **Alerta Preventiva de Red (Modo Local Sin Internet)**: "
+        "No se detecta conexión activa con la nube (Neon Cloud). Las terminales táctiles de **Cocina** y **Bodega** continúan operando con normalidad en la red Wi-Fi local. "
+        "Por procedimiento de control de inventario, **se recomienda evitar modificaciones administrativas** (cambios en recetas, catálogos o traspasos entre locales) hasta que se restablezca el enlace a la nube.",
+        icon="📡",
+    )
 
 # ==============================================================================
 # FRAGMENTO REACTIVO: DETALLE Y AUDITORÍA DE LOTES EN STOCK

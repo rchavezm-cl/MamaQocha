@@ -146,7 +146,22 @@ Cada acción genera una ficha inmutable:
 
 ---
 
-## 📂 6. Componentes del Código en el Repositorio
+## 📋 6. Protocolo Operativo Preventivo ante Cortes de Internet (SOP)
+
+Para prevenir cualquier discrepancia de inventarios entre sucursales durante una caída de internet, se establece la siguiente regla operativa:
+
+1. **Operación Física Habilitada (Sin Restricciones):**
+   * **Cocina:** Sigue despachando platos y descontando FEFO normalmente en la tablet.
+   * **Bodega:** Sigue recibiendo camiones de proveedores urgentes y registrando mermas en la tablet.
+   * Ambos movimientos se acumulan de forma segura en la cola *Outbox* del servidor local.
+2. **Operación Administrativa en Pausa Preventiva:**
+   * En el Panel Central (`app.py`), el sistema detecta la desconexión y muestra una alerta visual amarilla activa:
+     `📡 Alerta Preventiva: Sin conexión a Neon Cloud`.
+   * **Procedimiento:** Se recomienda al administrador **no realizar cambios estructurales** (edición de fichas técnicas de recetas, modificación de precios, altas de usuarios o emisión de traspasos entre locales) hasta que el enlace a la nube se restablezca, garantizando que no se generen desfasajes con la base maestra.
+
+---
+
+## 📂 7. Componentes del Código en el Repositorio
 
 * **`app.py`:** Interfaz ejecutiva Streamlit (Semáforo consolidado, auditoría, maestros y reportes SEREMI).
 * **`api_sync.py`:** Micro-servicio FastAPI receptor de lotes asíncronos y bootstrap de stock.
