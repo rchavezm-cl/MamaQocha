@@ -72,8 +72,15 @@
       </div>
     </div>
 
-    <!-- Controles centrales: Selección de Turno y Chef Responsable -->
+    <!-- Controles centrales: Selector de Modo Operativo y Turno -->
     <div class="flex items-center space-x-2">
+      <!-- BOTÓN SELECTOR DE MODO TÁCTIL (HUB RÁPIDO) -->
+      <button id="btn-modo-switch" onclick="app.abrirHub()" title="Cambiar entre Cocina y Bodega" class="bg-gray-800 hover:bg-gray-700 text-white border border-gray-700 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center space-x-2 transition shadow">
+        <span id="txt-modo-icon" class="text-base">🍳</span>
+        <span id="txt-modo-label">Modo Cocina</span>
+        <span class="text-[10px] text-blue-400 font-normal underline ml-1">Cambiar ⇄</span>
+      </button>
+
       <div class="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-lg border border-gray-700">
         <span class="text-xs text-gray-400 font-semibold uppercase">Turno:</span>
         <select id="sel-turno" class="bg-gray-900 text-sm font-medium text-white border-0 rounded px-2 py-0.5 focus:ring-1 focus:ring-red-500 outline-none">
@@ -83,8 +90,8 @@
         </select>
       </div>
 
-      <div class="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-lg border border-gray-700">
-        <span class="text-xs text-gray-400 font-semibold uppercase">👨‍🍳 Chef Turno:</span>
+      <div class="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-lg border border-gray-700" id="box-chef-turno">
+        <span class="text-xs text-gray-400 font-semibold uppercase">👨‍🍳 Turno:</span>
         <select id="sel-chef-turno" onchange="app.cambiarChefTurno(this.value)" class="bg-gray-900 text-xs font-semibold text-emerald-400 border-0 rounded px-2 py-0.5 focus:ring-1 focus:ring-emerald-500 outline-none">
           <option value="">Cargando personal...</option>
         </select>
@@ -117,93 +124,219 @@
   </header>
 
   <!-- ============================================================================== -->
-  <!-- ÁREA DE TRABAJO PRINCIPAL: COMANDAS + CATÁLOGO TÁCTIL                         -->
+  <!-- ÁREA DE TRABAJO PRINCIPAL: MODOS COCINA Y BODEGA                               -->
   <!-- ============================================================================== -->
-  <main class="flex-1 flex overflow-hidden">
+  <main class="flex-1 flex overflow-hidden relative">
     
-    <!-- PANEL IZQUIERDO: COMANDA ACTUAL / RESUMEN DE SALIDA -->
-    <aside class="w-80 lg:w-96 bg-gray-900 border-r border-gray-800 flex flex-col justify-between p-4 flex-shrink-0">
-      <div>
-        <div class="flex items-center justify-between pb-3 border-b border-gray-800">
-          <h2 class="text-base font-bold text-white flex items-center space-x-2">
-            <span>📋</span>
-            <span>Comanda en Preparación</span>
-          </h2>
-          <button onclick="app.limpiarComanda()" class="text-xs text-gray-400 hover:text-red-400 font-medium">Limpiar</button>
-        </div>
+    <!-- ========================================================================== -->
+    <!-- VISTA 1: MODO COCINA (KDS DE PREPARACIÓN Y COMANDAS)                       -->
+    <!-- ========================================================================== -->
+    <div id="vista-cocina" class="flex-1 flex overflow-hidden w-full h-full">
+      <!-- PANEL IZQUIERDO: COMANDA ACTUAL / RESUMEN DE SALIDA -->
+      <aside class="w-80 lg:w-96 bg-gray-900 border-r border-gray-800 flex flex-col justify-between p-4 flex-shrink-0">
+        <div>
+          <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+              <span>📋</span>
+              <span>Comanda en Preparación</span>
+            </h2>
+            <button onclick="app.limpiarComanda()" class="text-xs text-gray-400 hover:text-red-400 font-medium">Limpiar</button>
+          </div>
 
-        <!-- Lista de platos agregados a la comanda -->
-        <div id="lista-comanda" class="mt-3 space-y-2 overflow-y-auto max-h-[50vh] pr-1 scrollbar-thin">
-          <div class="text-center py-10 text-gray-500 text-sm">
-            <span class="text-3xl block mb-2">🍽️</span>
-            Selecciona platos del menú para preparar
+          <!-- Lista de platos agregados a la comanda -->
+          <div id="lista-comanda" class="mt-3 space-y-2 overflow-y-auto max-h-[50vh] pr-1 scrollbar-thin">
+            <div class="text-center py-10 text-gray-500 text-sm">
+              <span class="text-3xl block mb-2">🍽️</span>
+              Selecciona platos del menú para preparar
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Acciones de Despacho y Contingencia -->
-      <div class="pt-4 border-t border-gray-800 space-y-3">
-        <!-- Resumen de Platos -->
-        <div class="flex justify-between items-center text-sm font-semibold">
-          <span class="text-gray-400">Total Platos:</span>
-          <span id="txt-total-platos" class="text-white text-lg font-bold">0</span>
+        <!-- Acciones de Despacho y Contingencia -->
+        <div class="pt-4 border-t border-gray-800 space-y-3">
+          <!-- Resumen de Platos -->
+          <div class="flex justify-between items-center text-sm font-semibold">
+            <span class="text-gray-400">Total Platos:</span>
+            <span id="txt-total-platos" class="text-white text-lg font-bold">0</span>
+          </div>
+
+          <!-- BOTÓN PRINCIPAL: DESPACHAR COMANDA -->
+          <button id="btn-despachar" onclick="app.despacharComanda()" disabled class="w-full bg-red-600 hover:bg-red-700 disabled:bg-gray-800 disabled:text-gray-600 text-white font-bold py-3 px-4 rounded-xl shadow-lg transition flex items-center justify-center space-x-2 text-base">
+            <span>⚡</span>
+            <span>Despachar y Descontar FEFO</span>
+          </button>
+
+          <!-- BOTÓN DE RECEPCIÓN DE MERCADERÍAS (CONDICIONAL: SOLO ANTE OFFLINE O QUIEBRE) -->
+          <button id="btn-recepcion" onclick="app.abrirModalRecepcion()" class="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-2.5 px-3 rounded-xl shadow border border-emerald-500/40 flex items-center justify-center space-x-2 text-xs transition hidden">
+            <span class="text-base">📥</span>
+            <span>Recepción Emergencia (Offline)</span>
+          </button>
+
+          <!-- Botones de Operación Auxiliar -->
+          <div class="grid grid-cols-2 gap-2 pt-1">
+            <button onclick="app.abrirModalMerma()" class="bg-gray-800 hover:bg-gray-700 text-yellow-400 border border-yellow-700/50 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition">
+              <span>⚠️</span>
+              <span>Reg. Merma</span>
+            </button>
+
+            <!-- BOTÓN DE TRASPASOS (Se bloquea intencionalmente en Offline) -->
+            <button id="btn-traspasos" onclick="app.intentarTraspaso()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition">
+              <span>🚚</span>
+              <span>Traspaso Local</span>
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- PANEL DERECHO: CATÁLOGO DE PLATOS / RECETAS -->
+      <section class="flex-1 flex flex-col bg-gray-950 p-4 overflow-hidden">
+        <!-- Filtros de categoría -->
+        <div class="flex items-center justify-between pb-3 flex-shrink-0">
+          <div id="filtros-categoria" class="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-thin">
+            <button onclick="app.filtrarCategoria('TODAS')" class="cat-btn active bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition">Todas</button>
+            <button onclick="app.filtrarCategoria('Ceviches')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Ceviches</button>
+            <button onclick="app.filtrarCategoria('Calientes')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Calientes</button>
+            <button onclick="app.filtrarCategoria('Causas y Entradas')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Entradas</button>
+            <button onclick="app.filtrarCategoria('Bebidas y Postres')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Postres/Bebidas</button>
+          </div>
+
+          <!-- Botón de Simulación de Red (Para Examen / Defensa) -->
+          <div class="flex items-center space-x-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-lg text-xs">
+            <span class="text-gray-400 font-medium">Simular Red:</span>
+            <button id="btn-toggle-red" onclick="app.simularCorteRed()" class="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-2 py-0.5 rounded transition">
+              Cortar Conexión ⚡
+            </button>
+          </div>
         </div>
 
-        <!-- BOTÓN PRINCIPAL: DESPACHAR COMANDA -->
-        <button id="btn-despachar" onclick="app.despacharComanda()" disabled class="w-full bg-red-600 hover:bg-red-700 disabled:bg-gray-800 disabled:text-gray-600 text-white font-bold py-3 px-4 rounded-xl shadow-lg transition flex items-center justify-center space-x-2 text-base">
-          <span>⚡</span>
-          <span>Despachar y Descontar FEFO</span>
-        </button>
+        <!-- Cuadrícula de Platos -->
+        <div id="grid-platos" class="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 overflow-y-auto pr-1 pb-4 scrollbar-thin">
+          <!-- Renderizado dinámico desde app.js -->
+          <div class="col-span-full text-center py-20 text-gray-500">Cargando recetas del local...</div>
+        </div>
+      </section>
+    </div>
 
-        <!-- BOTÓN DE RECEPCIÓN DE MERCADERÍAS (CONDICIONAL: SOLO ANTE OFFLINE O QUIEBRE) -->
-        <button id="btn-recepcion" onclick="app.abrirModalRecepcion()" class="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-2.5 px-3 rounded-xl shadow border border-emerald-500/40 flex items-center justify-center space-x-2 text-xs transition hidden">
-          <span class="text-base">📥</span>
-          <span>Recepción Emergencia (Offline)</span>
-        </button>
-
-        <!-- Botones de Operación Auxiliar -->
-        <div class="grid grid-cols-2 gap-2 pt-1">
-          <button onclick="app.abrirModalMerma()" class="bg-gray-800 hover:bg-gray-700 text-yellow-400 border border-yellow-700/50 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition">
+    <!-- ========================================================================== -->
+    <!-- VISTA 2: MODO BODEGA (RECEPCIÓN & CONTROL DE STOCK LOCAL)                   -->
+    <!-- ========================================================================== -->
+    <div id="vista-bodega" class="flex-1 flex overflow-hidden w-full h-full hidden">
+      <!-- PANEL IZQUIERDO: STOCK FEFO DEL LOCAL -->
+      <aside class="w-80 lg:w-96 bg-gray-900 border-r border-gray-800 flex flex-col justify-between p-4 flex-shrink-0">
+        <div>
+          <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+              <span>📦</span>
+              <span>Stock en Bodega</span>
+            </h2>
+            <button onclick="app.actualizarStockLocal()" class="text-xs text-blue-400 hover:text-blue-300 font-medium">Actualizar</button>
+          </div>
+          <p class="text-xs text-gray-400 mt-2 mb-3">Materias primas disponibles y balance local en tiempo real.</p>
+          <div id="lista-stock-bodega" class="space-y-2 overflow-y-auto max-h-[60vh] pr-1 scrollbar-thin">
+            <!-- Renderizado dinámico con app.renderBodegaStock() -->
+            <div class="text-center py-10 text-gray-500 text-xs">Cargando inventario...</div>
+          </div>
+        </div>
+        <div class="pt-4 border-t border-gray-800">
+          <button onclick="app.abrirModalMerma()" class="w-full bg-gray-800 hover:bg-gray-700 text-yellow-400 border border-yellow-700/50 py-3 px-4 rounded-xl text-xs font-bold flex items-center justify-center space-x-2 transition shadow">
             <span>⚠️</span>
-            <span>Reg. Merma</span>
-          </button>
-
-          <!-- BOTÓN DE TRASPASOS (Se bloquea intencionalmente en Offline) -->
-          <button id="btn-traspasos" onclick="app.intentarTraspaso()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition">
-            <span>🚚</span>
-            <span>Traspaso Local</span>
+            <span>Registrar Merma / Descarte de Insumo</span>
           </button>
         </div>
-      </div>
-    </aside>
+      </aside>
 
-    <!-- PANEL DERECHO: CATÁLOGO DE PLATOS / RECETAS -->
-    <section class="flex-1 flex flex-col bg-gray-950 p-4 overflow-hidden">
-      <!-- Filtros de categoría -->
-      <div class="flex items-center justify-between pb-3 flex-shrink-0">
-        <div id="filtros-categoria" class="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-thin">
-          <button onclick="app.filtrarCategoria('TODAS')" class="cat-btn active bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition">Todas</button>
-          <button onclick="app.filtrarCategoria('Ceviches')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Ceviches</button>
-          <button onclick="app.filtrarCategoria('Calientes')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Calientes</button>
-          <button onclick="app.filtrarCategoria('Causas y Entradas')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Entradas</button>
-          <button onclick="app.filtrarCategoria('Bebidas y Postres')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Postres/Bebidas</button>
+      <!-- PANEL DERECHO: FORMULARIO TÁCTIL DE RECEPCIÓN DIRECTA -->
+      <section class="flex-1 flex flex-col bg-gray-950 p-5 overflow-y-auto scrollbar-thin">
+        <div class="max-w-2xl mx-auto w-full space-y-4">
+          <div class="border-b border-gray-800 pb-3 flex justify-between items-center">
+            <div>
+              <h2 class="text-lg font-bold text-emerald-400 flex items-center space-x-2">
+                <span>📥</span>
+                <span>Recepción de Mercaderías de Proveedores</span>
+              </h2>
+              <p class="text-xs text-gray-400">Ingreso físico de camiones con control de temperatura HACCP y loteo automático</p>
+            </div>
+            <span class="px-2.5 py-1 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300 text-xs font-mono">Modo Bodega</span>
+          </div>
+
+          <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4 shadow-xl">
+            <!-- Insumo y Proveedor -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">Materia Prima:*</label>
+                <select id="sel-bodega-producto" onchange="app.onProductoBodegaChange(this.value)" class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-emerald-500"></select>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">Proveedor que entrega:*</label>
+                <select id="sel-bodega-proveedor" class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-emerald-500"></select>
+              </div>
+            </div>
+
+            <!-- Cantidad con Botones Táctiles -->
+            <div>
+              <div class="flex justify-between items-center mb-1">
+                <label class="text-xs font-semibold text-gray-300">Cantidad Recibida:*</label>
+                <span id="txt-bodega-unidad-badge" class="px-2 py-0.5 rounded bg-gray-800 text-emerald-400 font-mono text-xs">Unidad: kg</span>
+              </div>
+              <div class="flex space-x-2">
+                <input type="number" id="inp-bodega-cant" step="0.5" min="0.1" value="10.0" class="flex-1 bg-gray-950 border border-gray-700 rounded-lg p-2.5 text-lg font-bold text-emerald-300 outline-none focus:border-emerald-500">
+                <div class="flex space-x-1">
+                  <button type="button" onclick="app.sumarCantidadBodega(5)" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-bold text-xs">+5</button>
+                  <button type="button" onclick="app.sumarCantidadBodega(10)" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-bold text-xs">+10</button>
+                  <button type="button" onclick="app.sumarCantidadBodega(20)" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-bold text-xs">+20</button>
+                  <button type="button" onclick="app.sumarCantidadBodega(50)" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-bold text-xs">+50</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Guía/Factura y Lote -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">Guía de Despacho o Factura:</label>
+                <input type="text" id="inp-bodega-doc" placeholder="Ej. GD-8492" class="w-full bg-gray-950 border border-gray-700 rounded-lg p-2.5 text-sm text-white outline-none focus:border-emerald-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">Código de Lote Proveedor:</label>
+                <div class="flex space-x-1">
+                  <input type="text" id="inp-bodega-lote" placeholder="Ej. LOT-PRV-9921" class="flex-1 bg-gray-950 border border-gray-700 rounded-lg p-2.5 text-sm text-white font-mono outline-none focus:border-emerald-500">
+                  <button type="button" onclick="app.generarCodigoLoteBodegaAuto()" class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-blue-400 rounded-lg font-semibold" title="Generar lote automático">Auto</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Control HACCP: Vencimiento y Temperatura -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-gray-950/80 p-3 rounded-xl border border-emerald-900/40">
+              <div>
+                <label class="block text-xs font-semibold text-emerald-400 mb-1">📅 Fecha de Vencimiento:*</label>
+                <input type="date" id="inp-bodega-venc" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-2 text-sm text-white outline-none focus:border-emerald-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-emerald-400 mb-1">🌡️ Temperatura Camión (°C):*</label>
+                <input type="number" id="inp-bodega-temp" step="0.5" value="2.5" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-2 text-sm text-white font-mono outline-none focus:border-emerald-500">
+              </div>
+            </div>
+
+            <!-- Firma con PIN -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-gray-950/80 p-3 rounded-xl border border-gray-800">
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">✍️ Bodeguero / Responsable:*</label>
+                <select id="sel-bodega-usuario" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-2 text-sm text-white outline-none"></select>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-300 mb-1">PIN de Seguridad (4 dígitos):*</label>
+                <input type="password" id="inp-bodega-pin" maxlength="4" placeholder="••••" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-2 text-emerald-400 font-mono text-center tracking-widest text-sm outline-none">
+              </div>
+            </div>
+
+            <!-- Botón de Confirmación -->
+            <button onclick="app.guardarRecepcionBodegaDirecta()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg transition flex items-center justify-center space-x-2 text-base">
+              <span>💾</span>
+              <span>Registrar Ingreso Físico (Desbloquear Stock Inmediato)</span>
+            </button>
+          </div>
         </div>
-
-        <!-- Botón de Simulación de Red (Para Examen / Defensa) -->
-        <div class="flex items-center space-x-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-lg text-xs">
-          <span class="text-gray-400 font-medium">Simular Red:</span>
-          <button id="btn-toggle-red" onclick="app.simularCorteRed()" class="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-2 py-0.5 rounded transition">
-            Cortar Conexión ⚡
-          </button>
-        </div>
-      </div>
-
-      <!-- Cuadrícula de Platos -->
-      <div id="grid-platos" class="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 overflow-y-auto pr-1 pb-4 scrollbar-thin">
-        <!-- Renderizado dinámico desde app.js -->
-        <div class="col-span-full text-center py-20 text-gray-500">Cargando recetas del local...</div>
-      </div>
-    </section>
+      </section>
+    </div>
   </main>
 
   <!-- ============================================================================== -->
@@ -418,7 +551,53 @@
     </div>
   </div>
 
+  <!-- ============================================================================== -->
+  <!-- MODAL DE HUB: SELECTOR DE MODO TÁCTIL (COCINA vs BODEGA)                       -->
+  <!-- ============================================================================== -->
+  <div id="modal-hub" class="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center p-4">
+    <div class="bg-gray-900 border border-gray-800 rounded-3xl w-full max-w-2xl p-6 sm:p-8 shadow-2xl flex flex-col items-center text-center">
+      <div class="text-4xl mb-2">🦙</div>
+      <h2 class="text-2xl font-black text-white tracking-wide">MAMÁ QOCHA • ESTACIÓN LOCAL</h2>
+      <p class="text-sm text-gray-400 mt-1 mb-6">Selecciona el modo de trabajo táctil para esta pantalla</p>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
+        <!-- Tarjeta Modo Cocina -->
+        <button type="button" onclick="app.seleccionarModo('cocina')" class="group bg-gray-950 hover:bg-gray-800 border-2 border-red-500/40 hover:border-red-500 rounded-2xl p-6 flex flex-col items-center text-center transition transform active:scale-95 shadow-lg">
+          <div class="w-16 h-16 rounded-2xl bg-red-950/80 border border-red-500/50 flex items-center justify-center text-3xl mb-4 group-hover:scale-110 transition">
+            🍳
+          </div>
+          <h3 class="text-lg font-bold text-white group-hover:text-red-400">Modo Cocina (KDS)</h3>
+          <p class="text-xs text-gray-400 mt-2 leading-relaxed">
+            Preparación de pedidos, comandas táctiles en vivo, catálogo de recetas y deducción FEFO automática.
+          </p>
+          <span class="mt-4 inline-block bg-red-600 group-hover:bg-red-500 text-white text-xs font-bold px-4 py-2 rounded-xl transition">
+            Iniciar Turno Cocina ⚡
+          </span>
+        </button>
+
+        <!-- Tarjeta Modo Bodega -->
+        <button type="button" onclick="app.seleccionarModo('bodega')" class="group bg-gray-950 hover:bg-gray-800 border-2 border-emerald-500/40 hover:border-emerald-500 rounded-2xl p-6 flex flex-col items-center text-center transition transform active:scale-95 shadow-lg">
+          <div class="w-16 h-16 rounded-2xl bg-emerald-950/80 border border-emerald-500/50 flex items-center justify-center text-3xl mb-4 group-hover:scale-110 transition">
+            📦
+          </div>
+          <h3 class="text-lg font-bold text-white group-hover:text-emerald-400">Modo Bodega</h3>
+          <p class="text-xs text-gray-400 mt-2 leading-relaxed">
+            Recepción de camiones proveedores, ingreso de kilos, guías, control HACCP y registro de mermas.
+          </p>
+          <span class="mt-4 inline-block bg-emerald-600 group-hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2 rounded-xl transition">
+            Iniciar Turno Bodega 📥
+          </span>
+        </button>
+      </div>
+
+      <div class="mt-6 flex items-center space-x-2 text-xs text-gray-400">
+        <input type="checkbox" id="chk-fijar-modo" class="rounded bg-gray-800 border-gray-700 text-red-600 focus:ring-0">
+        <label for="chk-fijar-modo" class="cursor-pointer">Recordar este modo por defecto en esta pantalla</label>
+      </div>
+    </div>
+  </div>
+
   <!-- Carga del controlador JavaScript de la PWA -->
-  <script src="/cocina/app.js?v=3"></script>
+  <script src="/cocina/app.js?v=4"></script>
 </body>
 </html>

@@ -56,7 +56,8 @@ const state = {
   productosList: [],
   usuariosList: [],
   idChefActivo: null,
-  stockDisponiblePorProducto: {}
+  stockDisponiblePorProducto: {},
+  modoActivo: 'cocina'     // 'cocina' | 'bodega'
 };
 
 // 3. REGISTRO DEL SERVICE WORKER (CERO INSTALACIÓN / APERTURA OFFLINE)
@@ -99,6 +100,17 @@ const app = {
     await this.cargarBootstrap(state.idLocal);
     await this.actualizarContadorOutbox();
     this.evaluarConectividad();
+
+    // Inicializar Modo Operativo (HUB: Cocina vs Bodega)
+    const paramModo = urlParams.get('modo');
+    const modoGuardado = localStorage.getItem('mamaqocha_modo_activo');
+    if (paramModo === 'cocina' || paramModo === 'bodega') {
+      this.seleccionarModo(paramModo, false);
+    } else if (modoGuardado === 'cocina' || modoGuardado === 'bodega') {
+      this.seleccionarModo(modoGuardado, false);
+    } else {
+      this.abrirHub();
+    }
   },
 
   // ----------------------------------------------------------------------------
@@ -474,6 +486,7 @@ const app = {
     this.renderMenu();
     this.renderSelectorMerma(lotes);
     this.evaluarVisibilidadRecepcion();
+    this.renderBodegaStock();
   },
 
   renderMenu() {
@@ -649,11 +662,13 @@ const app = {
     const selChef = document.getElementById('sel-chef-turno');
     const selRec = document.getElementById('sel-recepcion-usuario');
     const selMerma = document.getElementById('sel-merma-usuario');
+    const selBodegaUsr = document.getElementById('sel-bodega-usuario');
 
     if (!state.usuariosList || state.usuariosList.length === 0) {
       if (selChef) selChef.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
       if (selRec) selRec.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
       if (selMerma) selMerma.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
+      if (selBodegaUsr) selBodegaUsr.innerHTML = '<option value="1">Carlos Mendoza (Jefe Cocina)</option>';
       state.idChefActivo = 1;
       return;
     }
@@ -676,6 +691,269 @@ const app = {
 
     if (selRec) selRec.innerHTML = opcionesHtml;
     if (selMerma) selMerma.innerHTML = opcionesHtml;
+    if (selBodegaUsr) selBodegaUsr.innerHTML = opcionesHtml;
+  },
+
+  // ----------------------------------------------------------------------------
+  // GESTIÓN DEL HUB TÁCTIL Y SELECCIÓN DE MODO (COCINA vs BODEGA)
+  // ----------------------------------------------------------------------------
+  abrirHub() {
+    const hub = document.getElementById('modal-hub');
+    if (hub) hub.classList.remove('hidden');
+  },
+
+  cerrarHub() {
+    const hub = document.getElementById('modal-hub');
+    if (hub) hub.classList.add('hidden');
+  },
+
+  seleccionarModo(modo, guardarPreferencia = true) {
+    state.modoActivo = modo;
+    const chkFijar = document.getElementById('chk-fijar-modo');
+    if (chkFijar && chkFijar.checked) {
+      localStorage.setItem('mamaqocha_modo_activo', modo);
+    } else if (guardarPreferencia && localStorage.getItem('mamaqocha_modo_activo')) {
+      localStorage.setItem('mamaqocha_modo_activo', modo);
+    }
+
+    this.cerrarHub();
+
+    const vistaCocina = document.getElementById('vista-cocina');
+    const vistaBodega = document.getElementById('vista-bodega');
+    const txtIcon = document.getElementById('txt-modo-icon');
+    const txtLabel = document.getElementById('txt-modo-label');
+
+    if (modo === 'bodega') {
+      if (vistaCocina) vistaCocina.classList.add('hidden');
+      if (vistaBodega) vistaBodega.classList.remove('hidden');
+      if (txtIcon) txtIcon.textContent = '📦';
+      if (txtLabel) txtLabel.textContent = 'Modo Bodega';
+      this.renderBodegaSelectores();
+      this.renderBodegaStock();
+      this.mostrarToast('📦 Modo Bodega', 'Recepción de mercaderías e inventario activado', 'info');
+    } else {
+      if (vistaBodega) vistaBodega.classList.add('hidden');
+      if (vistaCocina) vistaCocina.classList.remove('hidden');
+      if (txtIcon) txtIcon.textContent = '🍳';
+      if (txtLabel) txtLabel.textContent = 'Modo Cocina';
+      this.renderMenu();
+      this.mostrarToast('🍳 Modo Cocina', 'Comandas táctiles y despacho FEFO activado', 'info');
+    }
+  },
+
+  renderBodegaSelectores() {
+    const selProd = document.getElementById('sel-bodega-producto');
+    const selProv = document.getElementById('sel-bodega-proveedor');
+    const selUser = document.getElementById('sel-bodega-usuario');
+
+    if (selProd && state.productosList) {
+      selProd.innerHTML = state.productosList.map(p => `
+        <option value="${p.id_producto}">
+          ${p.nombre} (${p.unidad_medida})
+        </option>
+      `).join('');
+      if (state.productosList[0]) {
+        this.onProductoBodegaChange(state.productosList[0].id_producto);
+      }
+    }
+
+    if (selProv && state.proveedoresList) {
+      selProv.innerHTML = state.proveedoresList.map(pv => `
+        <option value="${pv.id_proveedor}">
+          ${pv.nombre} ${pv.rut ? `(${pv.rut})` : ''}
+        </option>
+      `).join('');
+    }
+
+    this.renderSelectoresUsuarios();
+
+    const inpVenc = document.getElementById('inp-bodega-venc');
+    if (inpVenc && !inpVenc.value) {
+      const d = new Date();
+      d.setDate(d.getDate() + 5);
+      inpVenc.value = d.toISOString().split('T')[0];
+    }
+
+    this.generarCodigoLoteBodegaAuto();
+  },
+
+  async renderBodegaStock() {
+    const container = document.getElementById('lista-stock-bodega');
+    if (!container) return;
+
+    const lotes = await dbLocal.stock_lotes.toArray();
+    if (lotes.length === 0) {
+      container.innerHTML = `<div class="text-center py-8 text-gray-500 text-xs">Sin lotes en stock local.</div>`;
+      return;
+    }
+
+    const stockMap = {};
+    for (const l of lotes) {
+      if (l.cantidad > 0) {
+        if (!stockMap[l.producto]) {
+          stockMap[l.producto] = { total: 0, unidad: l.unidad_medida || 'kg', lotes: 0 };
+        }
+        stockMap[l.producto].total += l.cantidad;
+        stockMap[l.producto].lotes += 1;
+      }
+    }
+
+    const entries = Object.entries(stockMap);
+    if (entries.length === 0) {
+      container.innerHTML = `<div class="text-center py-8 text-yellow-500 text-xs">⚠️ Stock agotado en todos los insumos.</div>`;
+      return;
+    }
+
+    container.innerHTML = entries.map(([prod, info]) => `
+      <div class="bg-gray-800/80 border border-gray-700/60 p-2.5 rounded-xl flex justify-between items-center text-xs">
+        <div>
+          <span class="font-bold text-white block">${prod}</span>
+          <span class="text-[10px] text-gray-400 font-mono">${info.lotes} lote(s) FEFO</span>
+        </div>
+        <div class="text-right">
+          <span class="font-mono font-bold text-emerald-400 text-sm block">${info.total.toFixed(1)} ${info.unidad}</span>
+          <span class="text-[9px] text-gray-500 uppercase">Disponible</span>
+        </div>
+      </div>
+    `).join('');
+  },
+
+  onProductoBodegaChange(idProdStr) {
+    const idProd = parseInt(idProdStr, 10);
+    const prod = state.productosList.find(p => p.id_producto === idProd);
+    const badge = document.getElementById('txt-bodega-unidad-badge');
+    if (prod && badge) {
+      badge.textContent = `Unidad: ${prod.unidad_medida}`;
+    }
+  },
+
+  sumarCantidadBodega(delta) {
+    const inp = document.getElementById('inp-bodega-cant');
+    if (!inp) return;
+    const actual = parseFloat(inp.value) || 0;
+    inp.value = Math.max(0.1, actual + delta).toFixed(1);
+  },
+
+  generarCodigoLoteBodegaAuto() {
+    const d = new Date();
+    const fecha = d.toISOString().slice(2, 10).replace(/-/g, '');
+    const rand = Math.floor(100 + Math.random() * 900);
+    const inp = document.getElementById('inp-bodega-lote');
+    if (inp) inp.value = `LOT-BOD-${fecha}-${rand}`;
+  },
+
+  async guardarRecepcionBodegaDirecta() {
+    const selProd = document.getElementById('sel-bodega-producto');
+    const selProv = document.getElementById('sel-bodega-proveedor');
+    const idProd = parseInt(selProd.value, 10);
+    const idProv = parseInt(selProv.value, 10);
+    const cant = parseFloat(document.getElementById('inp-bodega-cant').value);
+    const numDoc = document.getElementById('inp-bodega-doc').value.trim();
+    let codigoLote = document.getElementById('inp-bodega-lote').value.trim();
+    const fechaVenc = document.getElementById('inp-bodega-venc').value;
+    const tempRecepcion = parseFloat(document.getElementById('inp-bodega-temp').value) || 2.5;
+
+    const selUser = document.getElementById('sel-bodega-usuario');
+    const idUsuario = selUser ? parseInt(selUser.value, 10) : state.idChefActivo;
+    const pin = (document.getElementById('inp-bodega-pin')?.value || '').trim();
+    const userObj = state.usuariosList.find(u => u.id_usuario === idUsuario);
+
+    if (userObj && userObj.pin && pin !== userObj.pin) {
+      alert(`❌ PIN de seguridad incorrecto.\n\nLa recepción de bodega debe ser validada con el PIN de ${userObj.nombre} (PIN demo: ${userObj.pin}).`);
+      return;
+    }
+
+    if (!idProd || isNaN(cant) || cant <= 0) {
+      alert('Por favor especifica un producto y una cantidad mayor a 0.');
+      return;
+    }
+
+    if (!codigoLote) {
+      this.generarCodigoLoteBodegaAuto();
+      codigoLote = document.getElementById('inp-bodega-lote').value;
+    }
+
+    const prodObj = state.productosList.find(p => p.id_producto === idProd);
+    const nombreProd = prodObj ? prodObj.nombre : `Insumo #${idProd}`;
+    const unidadMedida = prodObj ? prodObj.unidad_medida : 'kg';
+    const provObj = state.proveedoresList.find(pv => pv.id_proveedor === idProv);
+    const nombreProv = provObj ? provObj.nombre : `Proveedor #${idProv}`;
+    const nombreUsuario = userObj ? userObj.nombre : 'Responsable Bodega';
+
+    const tInicio = performance.now();
+
+    // 1. Crear nuevo lote en IndexedDB local con ID provisorio
+    const idLoteProvisorio = -Math.floor(Date.now() / 1000);
+    const fechaHoy = new Date().toISOString().split('T')[0];
+
+    const nuevoLote = {
+      id_lote: idLoteProvisorio,
+      codigo_lote: codigoLote,
+      id_producto: idProd,
+      producto: nombreProd,
+      unidad_medida: unidadMedida,
+      cantidad: cant,
+      fecha_vencimiento: fechaVenc || fechaHoy,
+      fecha_recepcion: fechaHoy,
+      temperatura_recepcion: tempRecepcion
+    };
+
+    await dbLocal.stock_lotes.put(nuevoLote);
+
+    // 2. Generar el evento inmutable en el Outbox
+    const idEvento = crypto.randomUUID();
+    const evento = {
+      id_evento: idEvento,
+      tipo_evento: 'RECEPCION_MERCADERIA_OFFLINE',
+      fecha_local: new Date().toISOString(),
+      estado: 'PENDIENTE',
+      payload: {
+        id_local: state.idLocal,
+        id_proveedor: idProv,
+        nombre_proveedor: nombreProv,
+        id_producto: idProd,
+        nombre_producto: nombreProd,
+        unidad_medida: unidadMedida,
+        cantidad: cant,
+        codigo_lote_proveedor: codigoLote,
+        fecha_vencimiento: fechaVenc || fechaHoy,
+        fecha_recepcion: fechaHoy,
+        temperatura_recepcion: tempRecepcion,
+        tipo_documento: 'GUIA_DESPACHO',
+        numero_documento: numDoc || `GD-BOD-${idEvento.substring(0, 6)}`,
+        id_lote_provisorio: idLoteProvisorio,
+        id_usuario_receptor: idUsuario,
+        nombre_usuario_receptor: nombreUsuario,
+        observaciones: `Recepción física de bodega • Receptor: ${nombreUsuario} • Temp: ${tempRecepcion}°C`
+      }
+    };
+
+    await dbLocal.outbox_pendientes.put(evento);
+
+    const tFin = performance.now();
+    const deltaMs = (tFin - tInicio).toFixed(1);
+
+    // Limpiar campos para la siguiente recepción
+    const pinInp = document.getElementById('inp-bodega-pin');
+    if (pinInp) pinInp.value = '';
+    const docInp = document.getElementById('inp-bodega-doc');
+    if (docInp) docInp.value = '';
+    this.generarCodigoLoteBodegaAuto();
+
+    await this.actualizarStockLocal();
+    await this.actualizarContadorOutbox();
+    await this.renderBodegaStock();
+
+    this.mostrarToast(
+      '📥 Insumo Ingresado al Stock',
+      `+${cant} ${unidadMedida} de ${nombreProd} recibidos y disponibles (${deltaMs} ms)`,
+      'success'
+    );
+
+    // Sincronizar en background si hay red
+    if (navigator.onLine && !state.simulacionOfflineForzada) {
+      this.sincronizarColaBackground();
+    }
   },
 
   cambiarChefTurno(idUserStr) {
