@@ -1180,6 +1180,56 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* Lienzo principal optimizado: reduce el espacio muerto superior de 96px a 18px */
+    .main .block-container {
+        padding-top: 1.1rem !important;
+        padding-bottom: 2rem !important;
+        padding-left: 1.8rem !important;
+        padding-right: 1.8rem !important;
+        max-width: 100% !important;
+    }
+
+    /* Pastillas de navegación ultra-compactas (st.pills) */
+    div[data-testid="stPills"] {
+        gap: 4px !important;
+        margin-bottom: 2px !important;
+    }
+    div[data-testid="stPills"] button {
+        padding: 3px 9px !important;
+        font-size: 0.81rem !important;
+        min-height: 28px !important;
+        border-radius: 8px !important;
+        white-space: nowrap !important;
+    }
+
+    /* Estilo de sub-header unificado compacto */
+    .module-header-compact {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 2px 0;
+    }
+    .module-header-title {
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: #0d2b45;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        line-height: 1.2;
+    }
+    .module-header-tag {
+        font-size: 0.72rem;
+        color: #64748b;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-weight: 600;
+    }
+
     /* Estilos globales y tipografía */
     .hero-container {
         background:
@@ -1187,12 +1237,12 @@ st.markdown(
             radial-gradient(circle at 12% 85%, rgba(245, 158, 11, 0.14), transparent 38%),
             linear-gradient(135deg, #09192f 0%, #112d4e 55%, #163e6c 100%);
         border: 1px solid rgba(255, 255, 255, 0.14);
-        border-top: 4px solid #f59e0b;
-        border-radius: 16px;
-        padding: 20px 26px;
+        border-top: 3px solid #f59e0b;
+        border-radius: 12px;
+        padding: 10px 18px;
         color: #ffffff;
-        margin-bottom: 14px;
-        box-shadow: 0 10px 28px -6px rgba(9, 25, 47, 0.32);
+        margin-bottom: 8px;
+        box-shadow: 0 4px 16px rgba(9, 25, 47, 0.22);
         position: relative;
         overflow: hidden;
     }
@@ -1200,108 +1250,90 @@ st.markdown(
         display: flex;
         justify-content: space-between;
         align-items: center;
-        gap: 20px;
+        gap: 14px;
         flex-wrap: wrap;
-        margin-bottom: 14px;
+        margin-bottom: 0px;
     }
     .hero-brand-group {
         display: flex;
         align-items: center;
-        gap: 16px;
+        gap: 12px;
     }
     .hero-icon-box {
-        width: 56px;
-        height: 56px;
-        border-radius: 14px;
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
         background: linear-gradient(135deg, rgba(245, 158, 11, 0.2) 0%, rgba(56, 189, 248, 0.15) 100%);
         border: 1.5px solid rgba(245, 158, 11, 0.55);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 2.15rem;
+        font-size: 1.5rem;
         line-height: 1;
         flex-shrink: 0;
-        box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2);
     }
     .hero-title-text {
-        font-size: 1.85rem;
+        font-size: 1.35rem;
         font-weight: 800;
         margin: 0;
         color: #ffffff;
-        letter-spacing: -0.5px;
+        letter-spacing: -0.3px;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         flex-wrap: wrap;
     }
     .hero-version-pill {
-        font-size: 0.7rem;
-        font-weight: 800;
+        font-size: 0.65rem;
+        font-weight: 700;
         background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
         color: #451a03;
-        padding: 3px 10px;
-        border-radius: 20px;
-        letter-spacing: 0.5px;
+        padding: 2px 8px;
+        border-radius: 14px;
+        letter-spacing: 0.3px;
         text-transform: uppercase;
-        box-shadow: 0 2px 6px rgba(245, 158, 11, 0.3);
     }
     .hero-subtitle {
-        font-size: 0.9rem;
-        color: #cbd5e1;
-        margin-top: 3px;
-        line-height: 1.35;
+        display: none;
     }
     .hero-pulse-hud {
         background: rgba(15, 23, 42, 0.45);
         border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 12px;
-        padding: 10px 16px;
+        border-radius: 10px;
+        padding: 5px 12px;
         backdrop-filter: blur(8px);
         display: flex;
         align-items: center;
-        gap: 16px;
+        gap: 12px;
         flex-wrap: wrap;
     }
     .hero-pulse-item {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        gap: 1px;
     }
     .hero-pulse-divider {
         width: 1px;
-        height: 30px;
+        height: 22px;
         background: rgba(255, 255, 255, 0.16);
     }
     .hero-pulse-label {
-        font-size: 0.68rem;
+        font-size: 0.62rem;
         color: #94a3b8;
         font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.4px;
     }
     .hero-pulse-val {
-        font-size: 0.88rem;
+        font-size: 0.82rem;
         font-weight: 700;
         color: #f8fafc;
         display: flex;
         align-items: center;
-        gap: 5px;
+        gap: 4px;
     }
     .hero-badge-container {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        padding-top: 12px;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .hero-badge {
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        border-radius: 20px;
-        padding: 4px 12px;
-        font-size: 0.76rem;
-        font-weight: 600;
-        color: #f1f5f9;
+        display: none;
     }
 
     /* Tarjetas de métricas visuales (KPIs) */
@@ -2096,9 +2128,6 @@ st.markdown(
                         Mamá Qocha
                         <span class="hero-version-pill">v2.4 Enterprise</span>
                     </h1>
-                    <div class="hero-subtitle">
-                        Control Gastronómico de Trazabilidad, Rotación FEFO y Rescate de Insumos Críticos
-                    </div>
                 </div>
             </div>
             <div class="hero-pulse-hud">
@@ -2118,12 +2147,6 @@ st.markdown(
                 </div>
             </div>
         </div>
-        <div class="hero-badge-container">
-            <span class="hero-badge">🟢 Motor PostgreSQL 18 (Neon Cloud)</span>
-            <span class="hero-badge">⚖️ Despacho FEFO / FIFO Automatizado</span>
-            <span class="hero-badge">🛡️ Control Sanitario HACCP (≤ 4°C)</span>
-            <span class="hero-badge">📅 Operación: {date.today().strftime('%d-%m-%Y')}</span>
-        </div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -2131,14 +2154,14 @@ st.markdown(
 
 # Navegación principal perezosa (solo ejecuta consultas de la vista activa)
 NAV_MODULOS = {
-    "alertas": "🚦 Semáforo y Costos en Riesgo",
-    "recepcion": "📥 Recepción de Compras",
-    "cocina": "🍳 Salidas a Cocina (FEFO)",
-    "traslados": "🚚 Traspasos entre Locales",
-    "mermas": "🗑️ Control de Mermas (Bajas)",
-    "trazabilidad": "🔍 Trazabilidad y Auditoría",
-    "reportes": "🖨️ Reportes SEREMI (PDF)",
-    "maestros": "⚙️ Maestros (Catálogos)",
+    "alertas": "🚦 Semáforo & Riesgo",
+    "recepcion": "📥 Recepción",
+    "cocina": "🍳 Cocina (FEFO)",
+    "traslados": "🚚 Traspasos",
+    "mermas": "🗑️ Mermas",
+    "trazabilidad": "🔍 Trazabilidad",
+    "reportes": "🖨️ Reportes PDF",
+    "maestros": "⚙️ Maestros",
 }
 nav_tab = _select_pills(
     "Módulo Activo:",
@@ -2147,7 +2170,7 @@ nav_tab = _select_pills(
     default_key="alertas",
     label_visibility="collapsed",
 )
-st.markdown("<hr style='margin: 4px 0 14px 0; border-color: #e2e8f0;'>", unsafe_allow_html=True)
+st.markdown("<hr style='margin: 4px 0 8px 0; border-color: #e2e8f0;'>", unsafe_allow_html=True)
 
 # ==============================================================================
 # FRAGMENTO REACTIVO: DETALLE Y AUDITORÍA DE LOTES EN STOCK
@@ -2282,25 +2305,31 @@ def _render_detalle_lotes_fragment(inventario_df: pd.DataFrame, nombre_local_ctx
 # TAB 1: SEMÁFORO Y ALERTAS DE VENCIMIENTO CON VALORIZACIÓN
 # ==============================================================================
 if nav_tab == "alertas":
-    st.markdown("### 🚦 Monitor de Caducidad y Semáforo Financiero de Riesgo")
-    st.caption(
-        "Detección oportuna de partidas de insumos para priorizar su consumo inmediato "
-        "en cocina, erradicar pérdidas por caducidad y cuantificar el capital inmovilizado en riesgo."
-    )
-
-    SUBTABS_ALERTAS = {
-        "resumen": "📊 Resumen Ejecutivo & Semáforo",
-        "oportunidades": "🍳 Oportunidades & Rescate en Carta",
-        "lotes": "📋 Detalle de Lotes en Stock",
-    }
-    sub_tab_alerta = _select_pills(
-        "Sección del Monitor:",
-        SUBTABS_ALERTAS,
-        key="subnav_alertas_panel",
-        default_key="resumen",
-        label_visibility="collapsed",
-    )
-    st.markdown("<hr style='margin: 4px 0 14px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
+    col_ale_head1, col_ale_head2 = st.columns([1.1, 1.9], vertical_alignment="center")
+    with col_ale_head1:
+        st.markdown(
+            """
+            <div class="module-header-compact">
+                <h3 class="module-header-title">🚦 Semáforo & Riesgo</h3>
+                <span class="module-header-tag">Monitor FEFO</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_ale_head2:
+        SUBTABS_ALERTAS = {
+            "resumen": "📊 Resumen Ejecutivo",
+            "oportunidades": "🍳 Rescate en Carta",
+            "lotes": "📋 Lotes en Stock",
+        }
+        sub_tab_alerta = _select_pills(
+            "Sección del Monitor:",
+            SUBTABS_ALERTAS,
+            key="subnav_alertas_panel",
+            default_key="resumen",
+            label_visibility="collapsed",
+        )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     inventario_df = _c_inventario_alertas(id_local=id_local_activo)
 
@@ -3067,11 +3096,16 @@ if nav_tab == "alertas":
 # TAB 2: RECEPCIÓN DE COMPRAS Y GENERACIÓN DE LOTES
 # ==============================================================================
 elif nav_tab == "recepcion":
-    st.markdown("### 📥 Recepción de Compras y Alta de Lotes")
-    st.caption(
-        "Ingreso físico de materias primas. Se crea el lote de trazabilidad "
-        "y se suma el stock de forma inmediata a la sucursal receptora."
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">📥 Recepción de Compras</h3>
+            <span class="module-header-tag">Alta de Lotes & Control HACCP</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     if "voucher_recepcion" in st.session_state:
         v_rec = st.session_state.pop("voucher_recepcion")
@@ -3248,11 +3282,16 @@ elif nav_tab == "recepcion":
 # TAB 3: SALIDAS POR CONSUMO EN COCINA (FEFO Y RECETAS)
 # ==============================================================================
 elif nav_tab == "cocina":
-    st.markdown("### 🍳 Salidas a Cocina y Producción Culinaria")
-    st.caption(
-        "Control de consumos gastronómicos bajo criterio **FEFO** (First Expired, First Out). "
-        "Permite registrar producción por recetas estandarizadas (comandas por turno) o consumos directos por lote individual."
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">🍳 Salidas a Cocina</h3>
+            <span class="module-header-tag">Despacho FEFO</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     if id_local_activo:
         local_cocina_id = id_local_activo
@@ -3298,9 +3337,9 @@ elif nav_tab == "cocina":
             st.caption(f"📍 Conexión: `{api_base_url}`")
 
     COCINA_SUBTABS = {
-        "recetas": "📋 Producción por Recetas (Comanda / Turno)",
-        "manual": "📦 Salida Manual por Lote Individual",
-        "outbox": "🛰️ Bitácora Offline (Outbox)",
+        "recetas": "🍲 Por Recetas",
+        "manual": "📦 Por Lote Individual",
+        "outbox": "🛰️ Bitácora Offline",
     }
     cocina_sub = _select_pills(
         "Modo de operación en cocina:",
@@ -3706,11 +3745,16 @@ elif nav_tab == "cocina":
 # TAB 4: TRASPASOS ENTRE LOCALES
 # ==============================================================================
 elif nav_tab == "traslados":
-    st.markdown("### 🚚 Traspaso de Insumos entre Locales")
-    st.caption(
-        "Redistribución de inventario entre sucursales. El identificador de lote de origen "
-        "se preserva de forma estricta para garantizar trazabilidad continua."
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">🚚 Traspasos entre Locales</h3>
+            <span class="module-header-tag">Rebalanceo & Guías</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     # Control de Vouchers de Despacho
     if "voucher_traslado_consolidado" in st.session_state:
@@ -4011,11 +4055,16 @@ elif nav_tab == "traslados":
 # TAB 5: CONTROL DE MERMAS Y BAJAS (CONTROL DE COSTOS INACAP 4.5%)
 # ==============================================================================
 elif nav_tab == "mermas":
-    st.markdown("### 🗑️ Gestión y Control de Mermas de Materias Primas")
-    st.caption(
-        "Protocolo formal de baja y descarte para erradicar pérdidas no controladas (4,5% de costos "
-        "según diagnóstico INACAP, pág. 17) y garantizar la inocuidad alimentaria."
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">🗑️ Control de Mermas</h3>
+            <span class="module-header-tag">Bajas & Descarte</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     if "voucher_merma_consolidado" in st.session_state:
         v_mc = st.session_state.pop("voucher_merma_consolidado")
@@ -4268,23 +4317,30 @@ elif nav_tab == "mermas":
 # TAB 6: TRAZABILIDAD POR LOTE CON LÍNEA DE TIEMPO VISUAL
 # ==============================================================================
 elif nav_tab == "trazabilidad":
-    st.markdown("### 🔍 Expediente de Trazabilidad y Auditoría")
-    st.caption(
-        "Auditoría integral del ciclo de vida de cada lote: desde la compra al proveedor, "
-        "su ingreso físico, hasta su dispersión en sucursales y consumos en cocina."
-    )
-
-    TRAZ_SUBTABS = {
-        "expediente": "📦 Ficha de Trazabilidad por Lote",
-        "historial": "📋 Registro Global de Movimientos",
-    }
-    traz_sub = _select_pills(
-        "Vista de auditoría:",
-        TRAZ_SUBTABS,
-        key="nav_sub_trazabilidad",
-        default_key="expediente",
-        label_visibility="collapsed",
-    )
+    col_traz_head1, col_traz_head2 = st.columns([1.1, 1.9], vertical_alignment="center")
+    with col_traz_head1:
+        st.markdown(
+            """
+            <div class="module-header-compact">
+                <h3 class="module-header-title">🔍 Expediente de Trazabilidad</h3>
+                <span class="module-header-tag">Auditoría Lotes</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_traz_head2:
+        TRAZ_SUBTABS = {
+            "expediente": "📦 Ficha por Lote",
+            "historial": "📋 Registro Global de Movimientos",
+        }
+        traz_sub = _select_pills(
+            "Vista de auditoría:",
+            TRAZ_SUBTABS,
+            key="nav_sub_trazabilidad",
+            default_key="expediente",
+            label_visibility="collapsed",
+        )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     if traz_sub == "expediente":
         @st.fragment
@@ -4299,10 +4355,10 @@ elif nav_tab == "trazabilidad":
                 for _, row in lotes_disponibles.iterrows()
             }
 
-            col_sel_lote, _ = st.columns([2.5, 1])
+            col_sel_lote, col_hud_lote = st.columns([1.7, 1.3], vertical_alignment="bottom")
             with col_sel_lote:
                 lote_id_sel = st.selectbox(
-                    "Selecciona el lote para auditar su ciclo de vida:",
+                    "Lote a auditar:",
                     options=list(opciones_lotes.keys()),
                     format_func=lambda k: opciones_lotes[k],
                 )
@@ -4328,32 +4384,31 @@ elif nav_tab == "trazabilidad":
                         badge_color = "#2a9d8f"
                         badge_txt = "🟢 ÓPTIMO (> 30 días)"
 
-                    # Encabezado visual del lote
+                    with col_hud_lote:
+                        st.download_button(
+                            label=f"🖨️ Descargar Acta SEREMI (PDF)",
+                            data=lambda _t=trazabilidad: reportes_pdf.generar_pdf_expediente_lote(_t),
+                            file_name=f"Expediente_SEREMI_Lote_{info['id_lote']}.pdf",
+                            mime="application/pdf",
+                            width="stretch",
+                            key=f"btn_pdf_exp_lote_{info['id_lote']}",
+                            on_click="ignore",
+                        )
+
+                    # Encabezado visual compacto del lote
                     st.markdown(
                         f"""
-                        <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:10px; padding:18px; margin: 15px 0;">
-                            <div style="display:flex; justify-content:space-between; align-items:center;">
-                                <div>
-                                    <h3 style="margin:0; color:#0d2b45;">Lote Interno #{info['id_lote']} — {info['producto']}</h3>
-                                    <span style="color:#64748b; font-size:0.9rem;">Código Proveedor: <code>{info['codigo_lote_proveedor']}</code></span>
-                                </div>
-                                <span style="background:{badge_color}; color:#fff; padding:6px 14px; border-radius:20px; font-weight:700; font-size:0.85rem;">
-                                    {badge_txt}
-                                </span>
+                        <div style="background:#ffffff; border:1px solid #e2e8f0; border-left:4px solid {badge_color}; border-radius:8px; padding:8px 14px; margin: 6px 0 10px 0; display:flex; justify-content:space-between; align-items:center;">
+                            <div>
+                                <span style="font-weight:700; color:#0d2b45; font-size:1.02rem;">Lote Interno #{info['id_lote']} — {info['producto']}</span>
+                                <span style="color:#64748b; font-size:0.8rem; margin-left:8px;">(Cód. Proveedor: <code>{info['codigo_lote_proveedor']}</code>)</span>
                             </div>
+                            <span style="background:{badge_color}; color:#fff; padding:2px 10px; border-radius:12px; font-weight:700; font-size:0.75rem;">
+                                {badge_txt}
+                            </span>
                         </div>
                         """,
                         unsafe_allow_html=True,
-                    )
-
-                    st.download_button(
-                        label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info['id_lote']} (PDF)",
-                        data=lambda _t=trazabilidad: reportes_pdf.generar_pdf_expediente_lote(_t),
-                        file_name=f"Expediente_SEREMI_Lote_{info['id_lote']}.pdf",
-                        mime="application/pdf",
-                        width="stretch",
-                        key=f"btn_pdf_exp_lote_{info['id_lote']}",
-                        on_click="ignore",
                     )
 
                     # Timeline Stepper Visual (Línea de Vida del Lote)
@@ -4482,11 +4537,16 @@ elif nav_tab == "trazabilidad":
 # TAB 7: CENTRO DE REPORTES Y TRAZABILIDAD SEREMI (PDF)
 # ==============================================================================
 elif nav_tab == "reportes":
-    st.markdown("### 🖨️ Centro de Reportes y Trazabilidad Sanitaria SEREMI (PDF)")
-    st.caption(
-        "Emisión oficial de actas y libros auditables en PDF con trazabilidad completa de lotes, "
-        "temperaturas HACCP, proveedores y manipuladores responsables en cada etapa."
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">🖨️ Reportes SEREMI</h3>
+            <span class="module-header-tag">Auditoría Sanitaria PDF</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     @st.fragment
     def _render_reportes_fragment(
@@ -4835,25 +4895,32 @@ elif nav_tab == "reportes":
 # TAB 8: MANTENEDORES (CATÁLOGOS MAESTROS DE PROVEEDORES Y PRODUCTOS)
 # ==============================================================================
 elif nav_tab == "maestros":
-    st.markdown("### ⚙️ Administración de Catálogos Maestros")
-    st.caption(
-        "Mantenimiento centralizado de proveedores y materias primas. "
-        "Las altas y modificaciones se sincronizan de inmediato con los formularios de recepción e inventario."
-    )
-
-    MAESTROS_SUBTABS = {
-        "prov": "🏢 Catálogo de Proveedores",
-        "prod": "🥩 Catálogo de Materias Primas",
-        "recetas": "🍽️ Fichas Técnicas de Recetas",
-        "usuarios": "👥 Personal y Usuarios (Trazabilidad)",
-    }
-    maestros_sub = _select_pills(
-        "Catálogo maestro:",
-        MAESTROS_SUBTABS,
-        key="nav_sub_maestros",
-        default_key="prov",
-        label_visibility="collapsed",
-    )
+    col_mae_head1, col_mae_head2 = st.columns([1.0, 2.0], vertical_alignment="center")
+    with col_mae_head1:
+        st.markdown(
+            """
+            <div class="module-header-compact">
+                <h3 class="module-header-title">⚙️ Catálogos Maestros</h3>
+                <span class="module-header-tag">Administración</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_mae_head2:
+        MAESTROS_SUBTABS = {
+            "prov": "🏢 Proveedores",
+            "prod": "🥩 Materias Primas",
+            "recetas": "🍽️ Recetas",
+            "usuarios": "👥 Personal & Usuarios",
+        }
+        maestros_sub = _select_pills(
+            "Catálogo maestro:",
+            MAESTROS_SUBTABS,
+            key="nav_sub_maestros",
+            default_key="prov",
+            label_visibility="collapsed",
+        )
+    st.markdown("<hr style='margin: 2px 0 10px 0; border-color: #f1f5f9;'>", unsafe_allow_html=True)
 
     # --------------------------------------------------------------------------
     # SUBTAB: PROVEEDORES
