@@ -97,6 +97,42 @@ def _c_top_riesgo_traslado(id_local: int, limit: int = 7) -> pd.DataFrame:
     return db.load_top_riesgo_traslado(id_local, limit=limit)
 
 
+def _obtener_ip_local_red() -> str:
+    """Detecta la IP local del servidor en la red Wi-Fi o Ethernet para conectar tablets."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _generar_qr_data_uri(url: str, size: int = 150) -> str:
+    """Genera un data URI en base64 de un código QR vectorial SVG usando ReportLab nativo."""
+    import base64
+    from reportlab.graphics.barcode import qr
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderSVG
+
+    qr_code = qr.QrCodeWidget(url)
+    bounds = qr_code.getBounds()
+    width = bounds[2] - bounds[0]
+    height = bounds[3] - bounds[1]
+    d = Drawing(size, size, transform=[size / width, 0, 0, size / height, 0, 0])
+    d.add(qr_code)
+    svg_str = renderSVG.drawToString(d)
+    b64 = base64.b64encode(svg_str.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{b64}"
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _c_historial_movimientos(
     id_local: Optional[int] = None,
@@ -2095,6 +2131,36 @@ if st.sidebar.button("🔄 Sincronizar Datos en Vivo", width="stretch", help="Li
     st.cache_data.clear()
     st.rerun()
 
+# Popover para conectar tablets por QR dinámico
+with st.sidebar.popover("📲 Conectar Tablets (QR)", use_container_width=True):
+    ip_detectada = _obtener_ip_local_red()
+    id_local_param = id_local_activo if id_local_activo else 1
+    url_kds = f"http://{ip_detectada}:8000/cocina/?local={id_local_param}&modo=cocina"
+    url_bodega = f"http://{ip_detectada}:8000/cocina/?local={id_local_param}&modo=bodega"
+
+    st.markdown(f"**Servidor Local:** `{ip_detectada}:8000`")
+    st.caption("Apunta con la cámara de la tablet para conectar sin escribir la IP:")
+
+    tab_qr_coc, tab_qr_bod = st.tabs(["🍳 Cocina", "📦 Bodega"])
+    with tab_qr_coc:
+        uri_cocina = _generar_qr_data_uri(url_kds, size=160)
+        st.markdown(
+            f"<div style='text-align: center; margin: 4px 0;'>"
+            f"<img src='{uri_cocina}' width='160' style='border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);'><br>"
+            f"<a href='{url_kds}' target='_blank' style='font-size: 0.75rem; color: #0284c7; font-weight: 600; text-decoration: none;'>Abrir Cocina (KDS) ⚡</a>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with tab_qr_bod:
+        uri_bodega = _generar_qr_data_uri(url_bodega, size=160)
+        st.markdown(
+            f"<div style='text-align: center; margin: 4px 0;'>"
+            f"<img src='{uri_bodega}' width='160' style='border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);'><br>"
+            f"<a href='{url_bodega}' target='_blank' style='font-size: 0.75rem; color: #059669; font-weight: 600; text-decoration: none;'>Abrir Bodega 📥</a>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
 st.sidebar.caption("Base de datos: **PostgreSQL 18**")
 st.sidebar.caption("Lógica de Despacho: **FEFO / FIFO**")
 st.sidebar.markdown("---")
@@ -3321,23 +3387,33 @@ elif nav_tab == "cocina":
                 "Cálculo FEFO y comandas ultrarrápidas (< 5 ms) en el navegador con sincronización automática en segundo plano."
             )
         with col_pwa_btn:
-            api_base_url = "http://localhost:8000"
+            ip_detectada_kds = _obtener_ip_local_red()
+            api_base_url = f"http://{ip_detectada_kds}:8000"
             try:
                 if hasattr(st, "secrets") and "API_URL" in st.secrets:
                     api_base_url = st.secrets["API_URL"].rstrip("/")
             except Exception:
                 pass
             api_base_url = os.getenv("API_URL", api_base_url).rstrip("/")
-            url_terminal = f"{api_base_url}/cocina?local={local_cocina_id}"
-            
+            url_terminal = f"{api_base_url}/cocina/?local={local_cocina_id}&modo=cocina"
+            url_bodega_kds = f"{api_base_url}/cocina/?local={local_cocina_id}&modo=bodega"
+
             st.link_button(
                 "🚀 Abrir Terminal KDS",
                 url=url_terminal,
                 type="primary",
                 width="stretch",
-                help="Abre la pantalla táctil de cocina en una nueva pestaña"
+                help="Abre la pantalla táctil de cocina en una nueva pestaña",
             )
-            st.caption(f"📍 Conexión: `{api_base_url}`")
+            with st.popover("📲 Escanear QR Tablet", use_container_width=True):
+                tab_k_qr, tab_b_qr = st.tabs(["🍳 Cocina", "📦 Bodega"])
+                with tab_k_qr:
+                    uri_k = _generar_qr_data_uri(url_terminal, size=150)
+                    st.markdown(f"<div style='text-align: center;'><img src='{uri_k}' width='150' style='border-radius: 6px;'><br><span style='font-size: 0.75rem; color: #64748b;'>Modo Cocina</span></div>", unsafe_allow_html=True)
+                with tab_b_qr:
+                    uri_b = _generar_qr_data_uri(url_bodega_kds, size=150)
+                    st.markdown(f"<div style='text-align: center;'><img src='{uri_b}' width='150' style='border-radius: 6px;'><br><span style='font-size: 0.75rem; color: #64748b;'>Modo Bodega</span></div>", unsafe_allow_html=True)
+            st.caption(f"📍 Servidor Local: `{api_base_url}`")
 
     COCINA_SUBTABS = {
         "recetas": "🍲 Por Recetas",
