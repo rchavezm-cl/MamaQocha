@@ -98,8 +98,14 @@
       </div>
     </div>
 
-    <!-- Semáforo de Red y Botón de Sync -->
+    <!-- Semáforo de Red, Semáforo FEFO y Botón de Sync -->
     <div class="flex items-center space-x-3">
+      <!-- Badge de Estado Semáforo FEFO de Stock -->
+      <div id="badge-semaforo-fefo" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300 shadow cursor-help" title="Lotes en riesgo crítico según Semáforo de Riesgo (≤ 7 días para vencer)">
+        <span>🚦</span>
+        <span id="txt-semaforo-fefo">Semáforo: Verificando...</span>
+      </div>
+
       <!-- Indicador de Red -->
       <div id="semaforo-red" class="flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-bold text-white badge-online shadow">
         <span id="semaforo-dot" class="w-2.5 h-2.5 rounded-full bg-white animate-pulse"></span>
@@ -194,6 +200,7 @@
         <div class="flex items-center justify-between pb-3 flex-shrink-0">
           <div id="filtros-categoria" class="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-thin">
             <button onclick="app.filtrarCategoria('TODAS')" class="cat-btn active bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition">Todas</button>
+            <button onclick="app.filtrarCategoria('SUGERENCIAS_SEMAFORO')" class="cat-btn bg-amber-950/80 border border-amber-500/50 text-amber-300 hover:bg-amber-900/60 px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center space-x-1"><span>🔥</span><span>Sugerencias Semáforo</span></button>
             <button onclick="app.filtrarCategoria('Ceviches')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Ceviches</button>
             <button onclick="app.filtrarCategoria('Calientes')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Calientes</button>
             <button onclick="app.filtrarCategoria('Causas y Entradas')" class="cat-btn bg-gray-900 text-gray-300 hover:bg-gray-800 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition">Entradas</button>
@@ -598,6 +605,6 @@
   </div>
 
   <!-- Carga del controlador JavaScript de la PWA -->
-  <script src="/cocina/app.js?v=6"></script>
+  <script src="/cocina/app.js?v=7"></script>
 </body>
 </html>

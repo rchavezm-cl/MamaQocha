@@ -3476,6 +3476,55 @@ elif nav_tab == "cocina":
                     st.markdown(f"<div style='text-align: center;'><img src='{uri_b}' width='150' style='border-radius: 6px;'><br><span style='font-size: 0.75rem; color: #64748b;'>Modo Bodega</span></div>", unsafe_allow_html=True)
             st.caption(f"📍 Servidor Local: `{api_base_url}`")
 
+    # --------------------------------------------------------------------------
+    # PUENTE SEMÁFORO <-> COCINA: ALERTAS DE INSUMOS CRÍTICOS A LIQUIDAR
+    # --------------------------------------------------------------------------
+    _inv_cocina_df = _c_inventario_consolidado()
+    if not _inv_cocina_df.empty and "id_local" in _inv_cocina_df.columns:
+        _inv_local_act = _inv_cocina_df[_inv_cocina_df["id_local"] == int(local_cocina_id)]
+    else:
+        _inv_local_act = pd.DataFrame()
+
+    _lotes_crit_local = _inv_local_act[(_inv_local_act["dias_para_vencer"] >= 0) & (_inv_local_act["dias_para_vencer"] <= 7)] if not _inv_local_act.empty else pd.DataFrame()
+
+    if not _lotes_crit_local.empty:
+        _tot_kg_crit = _lotes_crit_local["cantidad"].sum()
+        _cant_lotes_crit = len(_lotes_crit_local)
+        _insumos_nombres = ", ".join(_lotes_crit_local["producto"].unique()[:3])
+        if len(_lotes_crit_local["producto"].unique()) > 3:
+            _insumos_nombres += f" y {len(_lotes_crit_local['producto'].unique()) - 3} más"
+
+        st.markdown(
+            f"""
+            <div style="background: linear-gradient(90deg, #fef2f2 0%, #fff7ed 100%); border: 1px solid #fed7aa; border-left: 5px solid #ea580c; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <div>
+                        <strong style="color: #9a3412; font-size: 0.95rem;">🚦 Alerta Semáforo en este Local: {_cant_lotes_crit} lote(s) en zona crítica ({_tot_kg_crit:.1f} kg)</strong><br>
+                        <span style="color: #7c2d12; font-size: 0.82rem;">
+                            Materias primas por vencer (≤ 7 días): <strong>{_insumos_nombres}</strong>. 
+                            El motor FEFO de cocina los descontará automáticamente al preparar los platos que los requieran.
+                        </span>
+                    </div>
+                    <span style="background: #ea580c; color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; white-space: nowrap;">
+                        Prioridad FEFO Activa 🔥
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 8px; padding: 7px 12px; margin-bottom: 10px;">
+                <span style="color: #166534; font-size: 0.82rem; font-weight: 600;">
+                    🚦 Semáforo de Riesgo en Verde: Este local no tiene materias primas críticas próximas a vencer (≤ 7 días). Todo el stock se encuentra en rango preventivo u óptimo.
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     COCINA_SUBTABS = {
         "recetas": "🍲 Por Recetas",
         "manual": "📦 Por Lote Individual",

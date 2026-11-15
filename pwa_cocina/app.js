@@ -512,24 +512,100 @@ const app = {
   async actualizarStockLocal() {
     const lotes = await dbLocal.stock_lotes.toArray();
     const map = {};
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    const productosCriticosSemaforo = {}; // { id_producto: { minDias: int, codigoLote: str, cantidad: float } }
+    let totalLotesCriticos = 0;
+
     for (const l of lotes) {
       if (l.cantidad > 0) {
         map[l.id_producto] = (map[l.id_producto] || 0) + l.cantidad;
+        if (l.fecha_vencimiento) {
+          const fVenc = new Date(l.fecha_vencimiento);
+          const diffDias = Math.ceil((fVenc - hoy) / (1000 * 60 * 60 * 24));
+          if (diffDias <= 7) {
+            totalLotesCriticos++;
+            if (!productosCriticosSemaforo[l.id_producto] || diffDias < productosCriticosSemaforo[l.id_producto].minDias) {
+              productosCriticosSemaforo[l.id_producto] = {
+                minDias: diffDias,
+                codigoLote: l.codigo_lote,
+                cantidad: l.cantidad
+              };
+            }
+          }
+        }
       }
     }
     state.stockDisponiblePorProducto = map;
+    state.productosCriticosSemaforo = productosCriticosSemaforo;
+    state.totalLotesCriticos = totalLotesCriticos;
+
+    this.actualizarBadgeSemaforoStock(totalLotesCriticos);
     this.renderMenu();
     this.renderSelectorMerma(lotes);
     this.evaluarVisibilidadRecepcion();
     this.renderBodegaStock();
   },
 
+  actualizarBadgeSemaforoStock(totalCriticos) {
+    const badge = document.getElementById('badge-semaforo-fefo');
+    const txt = document.getElementById('txt-semaforo-fefo');
+    if (!badge || !txt) return;
+
+    if (totalCriticos > 0) {
+      badge.className = 'flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/70 text-amber-300 shadow cursor-help animate-pulse';
+      txt.textContent = `Semáforo: ${totalCriticos} crítico(s)`;
+    } else {
+      badge.className = 'flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 shadow';
+      txt.textContent = 'Semáforo: FEFO Óptimo';
+    }
+  },
+
   renderMenu() {
     const grid = document.getElementById('grid-platos');
     const categoria = state.categoriaActiva;
-    const filtrados = categoria === 'TODAS' 
-      ? state.recetasList 
-      : state.recetasList.filter(r => r.categoria.toLowerCase().includes(categoria.toLowerCase()));
+
+    // Clasificar y enriquecer cada receta con su nivel de urgencia según el Semáforo FEFO
+    for (const r of state.recetasList) {
+      let esPrioridadFEFO = false;
+      let minDiasLoteCritico = 999;
+      let insumoCriticoNombre = '';
+
+      if (r.ingredientes && r.ingredientes.length > 0) {
+        for (const ing of r.ingredientes) {
+          const crit = state.productosCriticosSemaforo && state.productosCriticosSemaforo[ing.id_producto];
+          if (crit) {
+            esPrioridadFEFO = true;
+            if (crit.minDias < minDiasLoteCritico) {
+              minDiasLoteCritico = crit.minDias;
+              insumoCriticoNombre = ing.nombre;
+            }
+          }
+        }
+      }
+      r.esPrioridadFEFO = esPrioridadFEFO;
+      r.minDiasLoteCritico = minDiasLoteCritico;
+      r.insumoCriticoNombre = insumoCriticoNombre;
+    }
+
+    let filtrados = [];
+    if (categoria === 'SUGERENCIAS_SEMAFORO') {
+      filtrados = state.recetasList.filter(r => r.esPrioridadFEFO);
+      if (filtrados.length === 0) {
+        grid.innerHTML = `
+          <div class="col-span-full text-center py-16 text-emerald-400">
+            <span class="text-4xl block mb-2">🎉</span>
+            <p class="font-bold text-base">¡Excelente! Sin alertas de Semáforo</p>
+            <p class="text-xs text-gray-400 mt-1">No hay platos con materias primas críticas (≤ 7 días) pendientes de rescatar en este local.</p>
+          </div>
+        `;
+        return;
+      }
+    } else if (categoria === 'TODAS') {
+      filtrados = state.recetasList;
+    } else {
+      filtrados = state.recetasList.filter(r => r.categoria.toLowerCase().includes(categoria.toLowerCase()));
+    }
 
     if (filtrados.length === 0) {
       grid.innerHTML = `<div class="col-span-full text-center py-12 text-gray-500">No hay platos en esta categoría</div>`;
@@ -582,15 +658,32 @@ const app = {
         `;
       }
 
+      // Estilo condicional si tiene prioridad del Semáforo FEFO
+      const bordeClase = cant > 0 
+        ? 'border-red-500 ring-2 ring-red-500' 
+        : (r.esPrioridadFEFO ? 'border-amber-500/70 bg-gradient-to-b from-gray-900 to-amber-950/20' : 'border-gray-800');
+
       return `
-        <div class="card-plato bg-gray-900 border ${cant > 0 ? 'border-red-500 ring-1 ring-red-500' : 'border-gray-800'} rounded-xl p-3 flex flex-col justify-between shadow hover:border-gray-700 cursor-pointer">
+        <div class="card-plato bg-gray-900 border ${bordeClase} rounded-xl p-3 flex flex-col justify-between shadow hover:border-gray-600 cursor-pointer">
           <div>
             <div class="flex justify-between items-start">
               <span class="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-red-400">${r.categoria}</span>
-              <span class="text-[10px] text-green-400 font-semibold px-1.5 py-0.5 rounded bg-gray-800/80">Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}</span>
+              <div class="flex items-center space-x-1">
+                ${r.esPrioridadFEFO ? `
+                  <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-300 animate-pulse">🔥 Semáforo (${r.minDiasLoteCritico <= 0 ? 'Hoy' : r.minDiasLoteCritico + 'd'})</span>
+                ` : ''}
+                <span class="text-[10px] text-green-400 font-semibold px-1.5 py-0.5 rounded bg-gray-800/80">Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}</span>
+              </div>
             </div>
             <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
-            <p class="text-xs text-gray-400 mt-1">${numIng} insumos con FEFO</p>
+            ${r.esPrioridadFEFO ? `
+              <p class="text-xs text-amber-400 mt-1 font-semibold flex items-center space-x-1">
+                <span>🔥 Rescate FEFO:</span>
+                <span class="truncate">${r.insumoCriticoNombre}</span>
+              </p>
+            ` : `
+              <p class="text-xs text-gray-400 mt-1">${numIng} insumos con FEFO</p>
+            `}
           </div>
 
           <div class="mt-3 pt-2 border-t border-gray-800 flex items-center justify-between">
@@ -614,8 +707,11 @@ const app = {
       b.classList.remove('active', 'bg-red-700', 'text-white');
       b.classList.add('bg-gray-900', 'text-gray-300');
     });
-    event.target.classList.add('active', 'bg-red-700', 'text-white');
-    event.target.classList.remove('bg-gray-900', 'text-gray-300');
+    const btn = (typeof event !== 'undefined' && event && event.target) ? (event.target.closest('.cat-btn') || event.target) : null;
+    if (btn) {
+      btn.classList.add('active', 'bg-red-700', 'text-white');
+      btn.classList.remove('bg-gray-900', 'text-gray-300');
+    }
     this.renderMenu();
   },
 
