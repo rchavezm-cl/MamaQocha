@@ -1228,13 +1228,46 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Lienzo principal optimizado: reduce el espacio muerto superior de 96px a 18px */
-    .main .block-container {
-        padding-top: 1.1rem !important;
+    /* =========================================================================
+       ELIMINACIÓN DE ESPACIO MUERTO SUPERIOR DE STREAMLIT (Compatible v1.30+)
+       ========================================================================= */
+    header[data-testid="stHeader"] {
+        height: 0 !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        background: transparent !important;
+        z-index: 10;
+    }
+
+    /* Lienzo principal optimizado: reduce el espacio muerto superior de 96px a 8px */
+    .main .block-container,
+    div[data-testid="stMainBlockContainer"],
+    div[data-testid="stAppViewBlockContainer"],
+    .stMainBlockContainer,
+    section[data-testid="stMain"] > div.block-container,
+    [data-testid="stMain"] .block-container,
+    div.block-container {
+        padding-top: 0.5rem !important;
         padding-bottom: 2rem !important;
         padding-left: 1.8rem !important;
         padding-right: 1.8rem !important;
         max-width: 100% !important;
+    }
+
+    /* Evitar que bloques invisibles de st.markdown con <style> ocupen espacio vertical */
+    div[data-testid="element-container"]:has(> div[data-testid="stMarkdownContainer"] > style:only-child),
+    div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stMarkdownContainer"] > style:only-child) {
+        display: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        height: 0 !important;
+    }
+
+    /* Reubicar barra de herramientas de Streamlit para que no empuje el banner */
+    div[data-testid="stToolbar"] {
+        top: 0.25rem !important;
+        right: 1rem !important;
+        z-index: 999;
     }
 
     /* Pastillas de navegación ultra-compactas (st.pills) */
@@ -1283,6 +1316,7 @@ st.markdown(
 
     /* Estilos globales y tipografía */
     .hero-container {
+        margin-top: 0 !important;
         background:
             radial-gradient(circle at 88% 18%, rgba(56, 189, 248, 0.18), transparent 42%),
             radial-gradient(circle at 12% 85%, rgba(245, 158, 11, 0.14), transparent 38%),
@@ -1949,8 +1983,14 @@ st.markdown(
        ========================================================================= */
     @media (max-width: 768px) {
         /* Espaciado del lienzo en teléfonos */
-        .main .block-container {
-            padding-top: 1.5rem !important;
+        .main .block-container,
+        div[data-testid="stMainBlockContainer"],
+        div[data-testid="stAppViewBlockContainer"],
+        .stMainBlockContainer,
+        section[data-testid="stMain"] > div.block-container,
+        [data-testid="stMain"] .block-container,
+        div.block-container {
+            padding-top: 0.6rem !important;
             padding-left: 0.75rem !important;
             padding-right: 0.75rem !important;
             padding-bottom: 2rem !important;
