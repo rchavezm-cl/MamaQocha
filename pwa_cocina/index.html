@@ -99,17 +99,17 @@
     </div>
 
     <!-- Semáforo de Red, Semáforo FEFO y Botón de Sync -->
-    <div class="flex items-center space-x-3">
+    <div class="flex items-center space-x-2.5 flex-shrink-0">
       <!-- Badge de Estado Semáforo FEFO de Stock -->
-      <div id="badge-semaforo-fefo" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300 shadow cursor-help" title="Lotes en riesgo crítico según Semáforo de Riesgo (≤ 7 días para vencer)">
+      <div id="badge-semaforo-fefo" class="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300 shadow cursor-help whitespace-nowrap flex-shrink-0" title="Lotes en riesgo crítico según Semáforo de Riesgo (≤ 7 días para vencer)">
         <span>🚦</span>
-        <span id="txt-semaforo-fefo">Semáforo: Verificando...</span>
+        <span id="txt-semaforo-fefo">Verificando...</span>
       </div>
 
       <!-- Indicador de Red -->
-      <div id="semaforo-red" class="flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-bold text-white badge-online shadow">
+      <div id="semaforo-red" class="flex items-center space-x-2 px-2.5 py-1.5 rounded-full text-xs font-bold text-white badge-online shadow whitespace-nowrap flex-shrink-0">
         <span id="semaforo-dot" class="w-2.5 h-2.5 rounded-full bg-white animate-pulse"></span>
-        <span id="semaforo-txt">En Línea • Sincronizado</span>
+        <span id="semaforo-txt">En Línea</span>
       </div>
 
       <!-- Botón Manual de Sincronización -->
@@ -208,16 +208,16 @@
           </div>
 
           <!-- Botón de Simulación de Red (Para Examen / Defensa) -->
-          <div class="flex items-center space-x-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-lg text-xs">
-            <span class="text-gray-400 font-medium">Simular Red:</span>
-            <button id="btn-toggle-red" onclick="app.simularCorteRed()" class="bg-yellow-600 hover:bg-yellow-500 text-white font-bold px-2 py-0.5 rounded transition">
-              Cortar Conexión ⚡
+          <div class="flex items-center space-x-1.5 bg-gray-900 border border-gray-800 px-2.5 py-1 rounded-lg text-xs flex-shrink-0">
+            <span class="text-gray-400 text-[11px] hidden sm:inline">Red:</span>
+            <button id="btn-toggle-red" onclick="app.simularCorteRed()" class="bg-yellow-700/80 hover:bg-yellow-600 text-white font-bold px-2 py-0.5 rounded text-[11px] transition whitespace-nowrap">
+              Cortar ⚡
             </button>
           </div>
         </div>
 
-        <!-- Cuadrícula de Platos -->
-        <div id="grid-platos" class="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 overflow-y-auto pr-1 pb-4 scrollbar-thin">
+        <!-- Cuadrícula de Platos (4 columnas táctiles ergonómicas) -->
+        <div id="grid-platos" class="flex-1 grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5 overflow-y-auto pr-1 pb-4 scrollbar-thin">
           <!-- Renderizado dinámico desde app.js -->
           <div class="col-span-full text-center py-20 text-gray-500">Cargando recetas del local...</div>
         </div>
@@ -605,6 +605,6 @@
   </div>
 
   <!-- Carga del controlador JavaScript de la PWA -->
-  <script src="/cocina/app.js?v=7"></script>
+  <script src="/cocina/app.js?v=8"></script>
 </body>
 </html>

@@ -553,11 +553,11 @@ const app = {
     if (!badge || !txt) return;
 
     if (totalCriticos > 0) {
-      badge.className = 'flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/70 text-amber-300 shadow cursor-help animate-pulse';
-      txt.textContent = `Semáforo: ${totalCriticos} crítico(s)`;
+      badge.className = 'flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 border border-amber-500/70 text-amber-300 shadow cursor-help whitespace-nowrap flex-shrink-0 animate-pulse';
+      txt.textContent = `${totalCriticos} Críticos (FEFO)`;
     } else {
-      badge.className = 'flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 shadow';
-      txt.textContent = 'Semáforo: FEFO Óptimo';
+      badge.className = 'flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 shadow whitespace-nowrap flex-shrink-0';
+      txt.textContent = 'FEFO Óptimo';
     }
   },
 
@@ -664,36 +664,42 @@ const app = {
         : (r.esPrioridadFEFO ? 'border-amber-500/70 bg-gradient-to-b from-gray-900 to-amber-950/20' : 'border-gray-800');
 
       return `
-        <div class="card-plato bg-gray-900 border ${bordeClase} rounded-xl p-3 flex flex-col justify-between shadow hover:border-gray-600 cursor-pointer">
+        <div class="card-plato bg-gray-900 border ${bordeClase} rounded-xl p-3.5 flex flex-col justify-between shadow hover:border-gray-600 transition cursor-pointer">
           <div>
-            <div class="flex justify-between items-start">
-              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-red-400">${r.categoria}</span>
-              <div class="flex items-center space-x-1">
-                ${r.esPrioridadFEFO ? `
-                  <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-300 animate-pulse">🔥 Semáforo (${r.minDiasLoteCritico <= 0 ? 'Hoy' : r.minDiasLoteCritico + 'd'})</span>
-                ` : ''}
-                <span class="text-[10px] text-green-400 font-semibold px-1.5 py-0.5 rounded bg-gray-800/80">Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}</span>
-              </div>
+            <!-- Fila 1: Categoría y Disponibilidad con ancho completo holgado -->
+            <div class="flex justify-between items-center">
+              <span class="text-[11px] font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-300 whitespace-nowrap">${r.categoria}</span>
+              <span class="text-[11px] text-emerald-400 font-bold px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30 whitespace-nowrap">Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}</span>
             </div>
-            <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
+
+            <!-- Título del plato -->
+            <h3 class="font-bold text-white text-sm mt-2.5 leading-snug">${r.nombre}</h3>
+
+            <!-- Fila 2: Alerta FEFO o Detalle de Insumos -->
             ${r.esPrioridadFEFO ? `
-              <p class="text-xs text-amber-400 mt-1 font-semibold flex items-center space-x-1">
-                <span>🔥 Rescate FEFO:</span>
-                <span class="truncate">${r.insumoCriticoNombre}</span>
-              </p>
+              <div class="mt-2 py-1 px-2 rounded-lg bg-amber-950/60 border border-amber-500/40 flex items-center justify-between text-[11px]">
+                <span class="text-amber-300 font-bold flex items-center space-x-1 whitespace-nowrap">
+                  <span>🔥</span>
+                  <span>Prioridad FEFO</span>
+                </span>
+                <span class="text-amber-400 font-semibold text-[10px] truncate ml-1">
+                  ${r.minDiasLoteCritico <= 0 ? 'Vence hoy' : 'Vence en ' + r.minDiasLoteCritico + 'd'} (${r.insumoCriticoNombre})
+                </span>
+              </div>
             ` : `
-              <p class="text-xs text-gray-400 mt-1">${numIng} insumos con FEFO</p>
+              <p class="text-[11px] text-gray-400 mt-2">${numIng} insumo(s) FEFO estándar</p>
             `}
           </div>
 
-          <div class="mt-3 pt-2 border-t border-gray-800 flex items-center justify-between">
-            <span class="text-xs font-bold text-gray-300">$${r.precio_venta.toLocaleString('es-CL')}</span>
+          <!-- Fila Inferior: Precio y Controles Táctiles Ampliados -->
+          <div class="mt-3.5 pt-2 border-t border-gray-800 flex items-center justify-between">
+            <span class="text-sm font-extrabold text-white">$${r.precio_venta.toLocaleString('es-CL')}</span>
             <div class="flex items-center space-x-1.5" onclick="event.stopPropagation();">
               ${cant > 0 ? `
-                <button onclick="app.modificarCantidad(${r.id_receta}, -1)" class="w-7 h-7 bg-gray-800 hover:bg-gray-700 text-white rounded-lg flex items-center justify-center font-bold text-sm">-</button>
+                <button onclick="app.modificarCantidad(${r.id_receta}, -1)" class="w-8 h-8 bg-gray-800 hover:bg-gray-700 active:scale-95 text-white rounded-lg flex items-center justify-center font-bold text-base transition">-</button>
                 <span class="w-6 text-center font-bold text-sm text-red-400">${cant}</span>
               ` : ''}
-              <button onclick="app.modificarCantidad(${r.id_receta}, 1)" class="w-7 h-7 bg-red-600 hover:bg-red-500 text-white rounded-lg flex items-center justify-center font-bold text-sm shadow">+</button>
+              <button onclick="app.modificarCantidad(${r.id_receta}, 1)" class="w-8 h-8 bg-red-600 hover:bg-red-500 active:scale-95 text-white rounded-lg flex items-center justify-center font-bold text-base shadow transition">+</button>
             </div>
           </div>
         </div>
