@@ -348,7 +348,7 @@ const app = {
     if (pendientes.length === 0) return;
 
     state.isSyncing = true;
-    this.actualizarSemaforo('syncing', `Sincronizando ${pendientes.length} eventos...`);
+    this.actualizarSemaforo('syncing', `Sync (${pendientes.length})...`);
 
     try {
       const payloadEnvio = {
@@ -401,16 +401,16 @@ const app = {
 
     dbLocal.outbox_pendientes.count().then(count => {
       if (!isOnline) {
-        this.actualizarSemaforo('offline', `Modo Autónomo (${count} pendientes)`);
+        this.actualizarSemaforo('offline', `Offline (${count})`);
         // BLOQUEAR TRASPASOS EN MODO OFFLINE (REGLA DE NEGOCIO DISTRIBUIDA)
         btnTraspasos.classList.add('opacity-40', 'cursor-not-allowed', 'border-red-800');
         btnTraspasos.title = 'Función deshabilitada: Traspasos inter-locales requieren validación central.';
       } else if (count > 0) {
-        this.actualizarSemaforo('offline', `Pendientes de envío (${count})`);
+        this.actualizarSemaforo('offline', `Pendientes (${count})`);
         btnTraspasos.classList.remove('opacity-40', 'cursor-not-allowed', 'border-red-800');
         btnTraspasos.title = 'Traspaso a otra sucursal';
       } else {
-        this.actualizarSemaforo('online', 'En Línea • Sincronizado');
+        this.actualizarSemaforo('online', 'En Línea');
         btnTraspasos.classList.remove('opacity-40', 'cursor-not-allowed', 'border-red-800');
         btnTraspasos.title = 'Traspaso a otra sucursal';
       }
@@ -553,11 +553,11 @@ const app = {
     if (!badge || !txt) return;
 
     if (totalCriticos > 0) {
-      badge.className = 'flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold badge-fefo-alert shadow cursor-help whitespace-nowrap flex-shrink-0 animate-pulse';
-      txt.textContent = `${totalCriticos} Críticos (FEFO)`;
+      badge.className = 'flex items-center space-x-1 px-2 py-1 rounded-lg text-xs font-bold badge-fefo-alert shadow cursor-help whitespace-nowrap flex-shrink-0 animate-pulse';
+      txt.textContent = `${totalCriticos} Críticos`;
     } else {
-      badge.className = 'flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold badge-disp shadow whitespace-nowrap flex-shrink-0';
-      txt.textContent = 'FEFO Óptimo';
+      badge.className = 'flex items-center space-x-1 px-2 py-1 rounded-lg text-xs font-semibold badge-disp shadow whitespace-nowrap flex-shrink-0';
+      txt.textContent = 'FEFO OK';
     }
   },
 
@@ -930,8 +930,8 @@ const app = {
       if (vistaCocina) vistaCocina.classList.add('hidden');
       if (vistaBodega) vistaBodega.classList.remove('hidden');
       if (txtIcon) txtIcon.textContent = '📦';
-      if (txtLabel) txtLabel.textContent = 'Modo Bodega';
-      if (txtSubtitulo) txtSubtitulo.textContent = 'Terminal de Bodega y Recepción';
+      if (txtLabel) txtLabel.textContent = 'Bodega';
+      if (txtSubtitulo) txtSubtitulo.textContent = 'Terminal Bodega';
       if (lblResp) lblResp.textContent = '📦 Bodeguero:';
       
       // Preseleccionar por defecto al bodeguero del local
@@ -948,8 +948,8 @@ const app = {
       if (vistaBodega) vistaBodega.classList.add('hidden');
       if (vistaCocina) vistaCocina.classList.remove('hidden');
       if (txtIcon) txtIcon.textContent = '🍳';
-      if (txtLabel) txtLabel.textContent = 'Modo Cocina';
-      if (txtSubtitulo) txtSubtitulo.textContent = 'Terminal KDS de Cocina';
+      if (txtLabel) txtLabel.textContent = 'Cocina';
+      if (txtSubtitulo) txtSubtitulo.textContent = 'KDS Cocina';
       if (lblResp) lblResp.textContent = '👨‍🍳 Chef:';
 
       // Preseleccionar por defecto al jefe o cocinero del local
