@@ -42,6 +42,63 @@
     .badge-online { background-color: #059669; }
     .badge-offline { background-color: #d97706; }
     .badge-syncing { background-color: #2563eb; }
+
+    /* Estilos explícitos y adaptables para tarjetas KDS */
+    .badge-fefo-alert {
+      background-color: rgba(120, 53, 15, 0.45);
+      border: 1px solid rgba(245, 158, 11, 0.5);
+      color: #fde68a;
+    }
+    .badge-disp {
+      background-color: rgba(6, 78, 59, 0.5);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+    .badge-cat {
+      background-color: #1f2937;
+      color: #94a3b8;
+      border: 1px solid #374151;
+    }
+    .badge-quiebre {
+      background-color: rgba(127, 29, 29, 0.85);
+      border: 1px solid rgba(239, 68, 68, 0.6);
+      color: #fca5a5;
+    }
+    .card-fefo-border {
+      border: 1px solid rgba(245, 158, 11, 0.55) !important;
+      background: linear-gradient(180deg, #111827 0%, rgba(45, 26, 10, 0.35) 100%) !important;
+    }
+    .card-normal-border {
+      border: 1px solid #1f2937 !important;
+      background-color: #111827 !important;
+    }
+    .card-quiebre-border {
+      border: 1px solid rgba(220, 38, 38, 0.6) !important;
+      background-color: rgba(69, 10, 10, 0.25) !important;
+    }
+    .card-active-border {
+      border: 2px solid #ef4444 !important;
+      box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.5) !important;
+      background-color: #111827 !important;
+    }
+
+    /* Fallbacks universales para compatibilidad con Tailwind v2 en selectores con barra de opacidad */
+    [class*="border-amber-500/"] { border-color: rgba(245, 158, 11, 0.5) !important; }
+    [class*="border-emerald-500/"] { border-color: rgba(16, 185, 129, 0.4) !important; }
+    [class*="border-emerald-600/"] { border-color: rgba(5, 150, 105, 0.5) !important; }
+    [class*="border-emerald-900/"] { border-color: rgba(6, 78, 59, 0.5) !important; }
+    [class*="border-red-500/"] { border-color: rgba(239, 68, 68, 0.5) !important; }
+    [class*="border-red-800/"] { border-color: rgba(153, 27, 27, 0.6) !important; }
+    [class*="border-yellow-700/"] { border-color: rgba(180, 83, 9, 0.5) !important; }
+    [class*="border-yellow-400/"] { border-color: rgba(251, 191, 36, 0.6) !important; }
+    [class*="border-gray-700/"] { border-color: rgba(55, 65, 81, 0.6) !important; }
+
+    [class*="bg-amber-950/"] { background-color: rgba(69, 26, 3, 0.6) !important; }
+    [class*="bg-emerald-950/"] { background-color: rgba(6, 78, 59, 0.6) !important; }
+    [class*="bg-red-950/"] { background-color: rgba(69, 10, 10, 0.4) !important; }
+    [class*="bg-gray-800/"] { background-color: rgba(31, 41, 55, 0.8) !important; }
+    [class*="bg-yellow-700/"] { background-color: rgba(180, 83, 9, 0.8) !important; }
+
     .card-plato {
       transition: transform 0.1s ease, box-shadow 0.1s ease;
     }
@@ -605,6 +662,6 @@
   </div>
 
   <!-- Carga del controlador JavaScript de la PWA -->
-  <script src="/cocina/app.js?v=8"></script>
+  <script src="/cocina/app.js?v=9"></script>
 </body>
 </html>
