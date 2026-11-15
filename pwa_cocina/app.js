@@ -73,6 +73,21 @@ if ('serviceWorker' in navigator) {
 // OBJETO CONTROLADOR DE LA APLICACIÓN (app)
 // ==============================================================================
 const app = {
+  // Generador universal de UUID v4 (Compatible con HTTPS, localhost y HTTP en IP privada LAN)
+  // NOTA: Chrome deshabilita crypto.randomUUID en contextos HTTP sobre IP de red local (ej. 192.168.x.x)
+  generarUUID() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      try {
+        return crypto.randomUUID();
+      } catch (_) {}
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  },
+
   async init() {
     // Detectar id_local de la URL (?local=X) o de config local
     const urlParams = new URLSearchParams(window.location.search);
@@ -219,102 +234,108 @@ const app = {
 
     // Validación de rol y función para el despacho de cocina
     const ROLES_COCINA = ['jefe_cocina', 'cocinero', 'administrador', 'operador'];
-    const chefObj = state.usuariosList.find(u => u.id_usuario === state.idChefActivo);
+    const chefObj = state.usuariosList.find(u => u.id_usuario == state.idChefActivo);
     if (chefObj && !ROLES_COCINA.includes(chefObj.rol)) {
       alert(`🚫 Acceso Denegado por Función\n\nEl usuario actual "${chefObj.nombre}" tiene perfil de "${chefObj.rol.replace('_', ' ')}", el cual no está autorizado para despachar comandas en cocina.\n\nPor favor selecciona un Chef de Turno, Cocinero o Administrador.`);
       return;
     }
 
     const btnDespachar = document.getElementById('btn-despachar');
-    btnDespachar.disabled = true;
+    if (btnDespachar) btnDespachar.disabled = true;
 
-    const tInicio = performance.now();
+    try {
+      const tInicio = performance.now();
 
-    // 1. Calcular insumos requeridos en base a recetas
-    const requerimientos = {}; // { id_producto: kg_totales }
-    const platosResumen = {};
+      // 1. Calcular insumos requeridos en base a recetas
+      const requerimientos = {}; // { id_producto: kg_totales }
+      const platosResumen = {};
 
-    for (const [idRecStr, cant] of recetasSeleccionadas) {
-      const idRec = parseInt(idRecStr, 10);
-      platosResumen[idRec] = cant;
-      const rec = state.recetasList.find(r => r.id_receta === idRec);
-      if (!rec) continue;
+      for (const [idRecStr, cant] of recetasSeleccionadas) {
+        const idRec = parseInt(idRecStr, 10);
+        platosResumen[idRec] = cant;
+        const rec = state.recetasList.find(r => r.id_receta === idRec);
+        if (!rec) continue;
 
-      for (const ing of rec.ingredientes) {
-        const cantKg = ing.cantidad_kg * cant;
-        requerimientos[ing.id_producto] = (requerimientos[ing.id_producto] || 0) + cantKg;
-      }
-    }
-
-    // 2. Ejecutar deducción FEFO en IndexedDB local
-    const lotesActualizados = [];
-    const lotesAfectados = [];
-
-    for (const [idProdStr, kgRequeridos] of Object.entries(requerimientos)) {
-      const idProd = parseInt(idProdStr, 10);
-      let pendiente = kgRequeridos;
-
-      // Buscar lotes de ese producto ordenados por fecha de vencimiento (FEFO)
-      const lotesProd = await dbLocal.stock_lotes
-        .where('id_producto').equals(idProd)
-        .sortBy('fecha_vencimiento');
-
-      for (const lote of lotesProd) {
-        if (lote.cantidad <= 0) continue;
-        if (lote.cantidad >= pendiente) {
-          lote.cantidad -= pendiente;
-          lotesAfectados.push({ id_lote: lote.id_lote, consumido: pendiente, lote: lote.codigo_lote });
-          pendiente = 0;
-          lotesActualizados.push(lote);
-          break;
-        } else {
-          pendiente -= lote.cantidad;
-          lotesAfectados.push({ id_lote: lote.id_lote, consumido: lote.cantidad, lote: lote.codigo_lote });
-          lote.cantidad = 0;
-          lotesActualizados.push(lote);
+        for (const ing of (rec.ingredientes || [])) {
+          const cantKg = ing.cantidad_kg * cant;
+          requerimientos[ing.id_producto] = (requerimientos[ing.id_producto] || 0) + cantKg;
         }
       }
-    }
 
-    // Guardar cambios en el stock local de IndexedDB
-    if (lotesActualizados.length > 0) {
-      await dbLocal.stock_lotes.bulkPut(lotesActualizados);
-    }
+      // 2. Ejecutar deducción FEFO en IndexedDB local
+      const lotesActualizados = [];
+      const lotesAfectados = [];
 
-    // 3. Generar Evento Inmutable para el Outbox con UUID v4
-    const idEvento = crypto.randomUUID();
-    const nombreChef = chefObj ? chefObj.nombre : 'Jefe de Cocina';
+      for (const [idProdStr, kgRequeridos] of Object.entries(requerimientos)) {
+        const idProd = parseInt(idProdStr, 10);
+        let pendiente = kgRequeridos;
 
-    const evento = {
-      id_evento: idEvento,
-      tipo_evento: 'PRODUCCION_RECETAS',
-      fecha_local: new Date().toISOString(),
-      estado: 'PENDIENTE',
-      payload: {
-        orden_platos: platosResumen,
-        turno: state.turno,
-        id_usuario: state.idChefActivo,
-        nombre_usuario: nombreChef,
-        observaciones: `Despacho táctil KDS • Local ${state.idLocal} • Resp: ${nombreChef}`,
-        lotes_afectados_estimados: lotesAfectados
+        // Buscar lotes de ese producto ordenados por fecha de vencimiento (FEFO)
+        const lotesProd = await dbLocal.stock_lotes
+          .where('id_producto').equals(idProd)
+          .sortBy('fecha_vencimiento');
+
+        for (const lote of lotesProd) {
+          if (lote.cantidad <= 0) continue;
+          if (lote.cantidad >= pendiente) {
+            lote.cantidad -= pendiente;
+            lotesAfectados.push({ id_lote: lote.id_lote, consumido: pendiente, lote: lote.codigo_lote });
+            pendiente = 0;
+            lotesActualizados.push(lote);
+            break;
+          } else {
+            pendiente -= lote.cantidad;
+            lotesAfectados.push({ id_lote: lote.id_lote, consumido: lote.cantidad, lote: lote.codigo_lote });
+            lote.cantidad = 0;
+            lotesActualizados.push(lote);
+          }
+        }
       }
-    };
 
-    // Guardar en la cola Outbox local
-    await dbLocal.outbox_pendientes.put(evento);
+      // Guardar cambios en el stock local de IndexedDB
+      if (lotesActualizados.length > 0) {
+        await dbLocal.stock_lotes.bulkPut(lotesActualizados);
+      }
 
-    const tFin = performance.now();
-    const deltaMs = (tFin - tInicio).toFixed(1);
+      // 3. Generar Evento Inmutable para el Outbox con UUID v4 (Universal / HTTP LAN compatible)
+      const idEvento = this.generarUUID();
+      const nombreChef = chefObj ? chefObj.nombre : 'Jefe de Cocina';
 
-    // 4. Limpiar comanda y actualizar UI de inmediato (Optimistic UI)
-    this.limpiarComanda();
-    await this.actualizarStockLocal();
-    await this.actualizarContadorOutbox();
-    this.mostrarToast('⚡ Despacho Local Exitoso', `Stock FEFO descontado en ${deltaMs} ms (UUID: ${idEvento.substring(0, 8)})`, 'success');
+      const evento = {
+        id_evento: idEvento,
+        tipo_evento: 'PRODUCCION_RECETAS',
+        fecha_local: new Date().toISOString(),
+        estado: 'PENDIENTE',
+        payload: {
+          orden_platos: platosResumen,
+          turno: state.turno,
+          id_usuario: state.idChefActivo,
+          nombre_usuario: nombreChef,
+          observaciones: `Despacho táctil KDS • Local ${state.idLocal} • Resp: ${nombreChef}`,
+          lotes_afectados_estimados: lotesAfectados
+        }
+      };
 
-    // 5. Si hay red, sincronizar en segundo plano sin bloquear al cocinero
-    if (navigator.onLine && !state.simulacionOfflineForzada) {
-      this.sincronizarColaBackground();
+      // Guardar en la cola Outbox local
+      await dbLocal.outbox_pendientes.put(evento);
+
+      const tFin = performance.now();
+      const deltaMs = (tFin - tInicio).toFixed(1);
+
+      // 4. Limpiar comanda y actualizar UI de inmediato (Optimistic UI)
+      this.limpiarComanda();
+      await this.actualizarStockLocal();
+      await this.actualizarContadorOutbox();
+      this.mostrarToast('⚡ Despacho Local Exitoso', `Stock FEFO descontado en ${deltaMs} ms (UUID: ${idEvento.substring(0, 8)})`, 'success');
+
+      // 5. Si hay red, sincronizar en segundo plano sin bloquear al cocinero
+      if (navigator.onLine && !state.simulacionOfflineForzada) {
+        this.sincronizarColaBackground();
+      }
+    } catch (err) {
+      console.error('[KDS] Error en despacharComanda:', err);
+      alert('Error en despacho: ' + err.message);
+      if (btnDespachar) btnDespachar.disabled = false;
     }
   },
 
@@ -1006,7 +1027,7 @@ const app = {
     await dbLocal.stock_lotes.put(nuevoLote);
 
     // 2. Generar el evento inmutable en el Outbox
-    const idEvento = crypto.randomUUID();
+    const idEvento = this.generarUUID();
     const evento = {
       id_evento: idEvento,
       tipo_evento: 'RECEPCION_MERCADERIA_OFFLINE',
@@ -1111,7 +1132,7 @@ const app = {
     }
 
     // Encolar evento en Outbox
-    const idEvento = crypto.randomUUID();
+    const idEvento = this.generarUUID();
     await dbLocal.outbox_pendientes.put({
       id_evento: idEvento,
       tipo_evento: 'SALIDA_COCINA_MANUAL',
@@ -1300,7 +1321,7 @@ const app = {
     await dbLocal.stock_lotes.put(nuevoLote);
 
     // 2. Generar el evento inmutable para el Outbox
-    const idEvento = crypto.randomUUID();
+    const idEvento = this.generarUUID();
     const evento = {
       id_evento: idEvento,
       tipo_evento: 'RECEPCION_MERCADERIA_OFFLINE',
