@@ -104,10 +104,17 @@ const app = {
     // Inicializar Modo Operativo (HUB: Cocina vs Bodega)
     const paramModo = urlParams.get('modo');
     const modoGuardado = localStorage.getItem('mamaqocha_modo_activo');
-    if (paramModo === 'cocina' || paramModo === 'bodega') {
-      this.seleccionarModo(paramModo, false);
-    } else if (modoGuardado === 'cocina' || modoGuardado === 'bodega') {
-      this.seleccionarModo(modoGuardado, false);
+
+    // Prioridad de resolución:
+    // 1) Si esta pantalla/tablet ya tiene un modo guardado en localStorage, respetarlo firmemente.
+    // 2) Si viene un parámetro explícito en la URL (?modo=bodega o ?modo=cocina), adoptarlo y guardarlo.
+    // 3) Si no hay ninguno, desplegar el HUB de bienvenida para que el usuario elija.
+    const modoInicial = (modoGuardado === 'cocina' || modoGuardado === 'bodega')
+      ? modoGuardado
+      : ((paramModo === 'cocina' || paramModo === 'bodega') ? paramModo : null);
+
+    if (modoInicial) {
+      this.seleccionarModo(modoInicial, true);
     } else {
       this.abrirHub();
     }
@@ -772,11 +779,17 @@ const app = {
 
   seleccionarModo(modo, guardarPreferencia = true) {
     state.modoActivo = modo;
-    const chkFijar = document.getElementById('chk-fijar-modo');
-    if (chkFijar && chkFijar.checked) {
+    
+    // Persistir preferencia y sincronizar la URL del navegador para que F5 / recargar mantenga el modo
+    if (guardarPreferencia) {
       localStorage.setItem('mamaqocha_modo_activo', modo);
-    } else if (guardarPreferencia && localStorage.getItem('mamaqocha_modo_activo')) {
-      localStorage.setItem('mamaqocha_modo_activo', modo);
+      try {
+        const u = new URL(window.location.href);
+        u.searchParams.set('modo', modo);
+        window.history.replaceState({}, '', u.toString());
+      } catch (err) {
+        console.warn('[HUB] Error al actualizar URL param:', err);
+      }
     }
 
     this.cerrarHub();
