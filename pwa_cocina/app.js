@@ -640,9 +640,9 @@ const app = {
         return `
           <div class="card-plato card-quiebre-border rounded-xl p-3 flex flex-col justify-between shadow transition">
             <div>
-              <div class="flex items-center justify-between gap-1 w-full">
-                <span class="text-[10px] font-semibold px-2 py-0.5 rounded badge-cat truncate max-w-[58%]">${r.categoria}</span>
-                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded badge-quiebre whitespace-nowrap flex-shrink-0">⚠️ Quiebre</span>
+              <div class="flex items-center justify-between gap-1.5 w-full">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded badge-cat flex-1 min-w-0 truncate">${r.categoria}</span>
+                <span class="text-xs font-bold px-1.5 py-0.5 rounded badge-quiebre whitespace-nowrap flex-shrink-0">⚠️ Quiebre</span>
               </div>
               <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
               <p class="text-xs text-red-400 mt-1 font-semibold truncate">Falta: ${ingredienteQuebrado.nombre}</p>
@@ -667,11 +667,11 @@ const app = {
         <div class="card-plato ${bordeClase} rounded-xl p-3 flex flex-col justify-between shadow hover:border-gray-500 transition cursor-pointer">
           <div>
             <!-- Fila 1: Categoría y Disponibilidad con protección contra desbordes -->
-            <div class="flex items-center justify-between gap-1 w-full">
-              <span class="text-[10px] font-semibold px-2 py-0.5 rounded badge-cat truncate max-w-[58%]">
+            <div class="flex items-center justify-between gap-1.5 w-full">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded badge-cat flex-1 min-w-0 truncate">
                 ${r.categoria}
               </span>
-              <span class="text-[10px] font-bold px-1.5 py-0.5 rounded badge-disp whitespace-nowrap flex-shrink-0">
+              <span class="text-xs font-bold px-1.5 py-0.5 rounded badge-disp whitespace-nowrap flex-shrink-0">
                 Disp: ${porcionesEstimadas > 50 ? '50+' : porcionesEstimadas}
               </span>
             </div>
@@ -679,19 +679,17 @@ const app = {
             <!-- Título del plato -->
             <h3 class="font-bold text-white text-sm mt-2 leading-tight">${r.nombre}</h3>
 
-            <!-- Fila 2: Alerta FEFO o Detalle de Insumos -->
+            <!-- Fila 2: Alerta FEFO minimalista -->
             ${r.esPrioridadFEFO ? `
-              <div class="mt-2 py-1 px-2 rounded-lg badge-fefo-alert flex flex-col gap-0.5">
-                <div class="flex items-center justify-between text-[10px] font-bold text-amber-300">
-                  <span class="flex items-center space-x-1"><span>🔥</span><span>Prioridad FEFO</span></span>
-                  <span class="text-amber-400 font-semibold">${r.minDiasLoteCritico <= 0 ? 'Vence hoy' : 'Vence en ' + r.minDiasLoteCritico + 'd'}</span>
-                </div>
-                <div class="text-[10px] text-amber-200/80 truncate">
-                  Rescate: <strong>${r.insumoCriticoNombre}</strong>
-                </div>
+              <div class="mt-2 py-1 px-2 rounded-lg badge-fefo-alert flex items-center space-x-1.5 text-xs">
+                <span>🔥</span>
+                <span class="font-bold text-amber-300">Prioridad:</span>
+                <span class="font-semibold text-amber-200 truncate">${r.insumoCriticoNombre}</span>
               </div>
             ` : `
-              <p class="text-[11px] text-gray-400 mt-2">${numIng} insumo(s) FEFO estándar</p>
+              <div class="mt-2 py-1 px-2 text-xs text-gray-400 truncate">
+                ${numIng} insumo(s)
+              </div>
             `}
           </div>
 
