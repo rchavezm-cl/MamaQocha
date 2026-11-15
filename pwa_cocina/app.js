@@ -681,11 +681,20 @@ const app = {
     }
 
     const ROLES_COCINA = ['jefe_cocina', 'cocinero', 'administrador', 'operador'];
-    const ROLES_BODEGA = ['bodeguero', 'administrador', 'jefe_cocina'];
+    const ROLES_BODEGA = ['bodeguero', 'administrador'];
 
     const esModoBodega = state.modoActivo === 'bodega';
     const rolesHeaderPermitidos = esModoBodega ? ROLES_BODEGA : ROLES_COCINA;
     const usuariosHeader = state.usuariosList.filter(u => rolesHeaderPermitidos.includes(u.rol));
+
+    // Ordenar para que el rol principal de cada modo siempre aparezca al inicio
+    if (esModoBodega) {
+      usuariosHeader.sort((a, b) => (a.rol === 'bodeguero' ? -1 : 1));
+    } else {
+      const orden = { jefe_cocina: 1, cocinero: 2, operador: 3, administrador: 4 };
+      usuariosHeader.sort((a, b) => (orden[a.rol] || 99) - (orden[b.rol] || 99));
+    }
+
     const usuariosParaHeader = usuariosHeader.length > 0 ? usuariosHeader : state.usuariosList;
 
     const buildOptions = (list) => list.map(u => `
@@ -698,14 +707,21 @@ const app = {
     if (selChef) {
       selChef.innerHTML = buildOptions(usuariosParaHeader);
       
-      const existeSeleccionado = usuariosParaHeader.some(u => u.id_usuario === state.idChefActivo);
-      if (!state.idChefActivo || !existeSeleccionado) {
+      const usuarioActual = usuariosParaHeader.find(u => u.id_usuario === state.idChefActivo);
+      let cambiarPorModo = false;
+      if (esModoBodega && (!usuarioActual || usuarioActual.rol !== 'bodeguero')) {
+        cambiarPorModo = true;
+      } else if (!esModoBodega && (!usuarioActual || !['jefe_cocina', 'cocinero'].includes(usuarioActual.rol))) {
+        cambiarPorModo = true;
+      }
+
+      if (cambiarPorModo || !state.idChefActivo) {
         if (esModoBodega) {
           const bodeguero = usuariosParaHeader.find(u => u.rol === 'bodeguero') || usuariosParaHeader[0];
-          state.idChefActivo = bodeguero.id_usuario;
+          state.idChefActivo = bodeguero ? bodeguero.id_usuario : 1;
         } else {
           const jefe = usuariosParaHeader.find(u => u.rol === 'jefe_cocina') || usuariosParaHeader.find(u => u.rol === 'cocinero') || usuariosParaHeader[0];
-          state.idChefActivo = jefe.id_usuario;
+          state.idChefActivo = jefe ? jefe.id_usuario : 1;
         }
       }
       selChef.value = state.idChefActivo;
@@ -713,6 +729,7 @@ const app = {
 
     // 2. Selectores de Bodega y Recepción (Filtrados exclusivamente a roles de bodega/administración)
     const usuariosBodega = state.usuariosList.filter(u => ROLES_BODEGA.includes(u.rol));
+    usuariosBodega.sort((a, b) => (a.rol === 'bodeguero' ? -1 : 1));
     const usuariosParaBodega = usuariosBodega.length > 0 ? usuariosBodega : state.usuariosList;
     const opcionesBodega = buildOptions(usuariosParaBodega);
 
@@ -779,6 +796,12 @@ const app = {
       if (txtSubtitulo) txtSubtitulo.textContent = 'Terminal de Bodega y Recepción';
       if (lblResp) lblResp.textContent = '📦 Bodeguero:';
       
+      // Preseleccionar por defecto al bodeguero del local
+      if (state.usuariosList && state.usuariosList.length > 0) {
+        const bodeguero = state.usuariosList.find(u => u.rol === 'bodeguero');
+        if (bodeguero) state.idChefActivo = bodeguero.id_usuario;
+      }
+
       this.renderSelectoresUsuarios();
       this.renderBodegaSelectores();
       this.renderBodegaStock();
@@ -790,6 +813,12 @@ const app = {
       if (txtLabel) txtLabel.textContent = 'Modo Cocina';
       if (txtSubtitulo) txtSubtitulo.textContent = 'Terminal KDS de Cocina';
       if (lblResp) lblResp.textContent = '👨‍🍳 Chef:';
+
+      // Preseleccionar por defecto al jefe o cocinero del local
+      if (state.usuariosList && state.usuariosList.length > 0) {
+        const chef = state.usuariosList.find(u => u.rol === 'jefe_cocina') || state.usuariosList.find(u => u.rol === 'cocinero');
+        if (chef) state.idChefActivo = chef.id_usuario;
+      }
 
       this.renderSelectoresUsuarios();
       this.renderMenu();
@@ -915,7 +944,7 @@ const app = {
     const userObj = state.usuariosList.find(u => u.id_usuario === idUsuario);
 
     // Validación de rol y función para bodega
-    const ROLES_BODEGA = ['bodeguero', 'administrador', 'jefe_cocina'];
+    const ROLES_BODEGA = ['bodeguero', 'administrador'];
     if (userObj && !ROLES_BODEGA.includes(userObj.rol)) {
       alert(`🚫 Acceso Denegado por Función\n\nEl usuario "${userObj.nombre}" (${userObj.rol.replace('_', ' ')}) no tiene autorización para recepcionar mercaderías en bodega.\nDebe ser Bodeguero o Administrador.`);
       return;
@@ -1208,7 +1237,7 @@ const app = {
     const userObj = state.usuariosList.find(u => u.id_usuario === idUsuario);
 
     // Validación de rol y función para recepción
-    const ROLES_BODEGA = ['bodeguero', 'administrador', 'jefe_cocina'];
+    const ROLES_BODEGA = ['bodeguero', 'administrador'];
     if (userObj && !ROLES_BODEGA.includes(userObj.rol)) {
       alert(`🚫 Acceso Denegado por Función\n\nEl usuario "${userObj.nombre}" (${userObj.rol.replace('_', ' ')}) no tiene autorización para recepcionar mercaderías.\nDebe ser Bodeguero o Administrador.`);
       return;
