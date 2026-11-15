@@ -41,6 +41,20 @@ app.add_middleware(
 
 
 # ==============================================================================
+# CACHÉ EN MEMORIA PARA BOOTSTRAP (ALTO RENDIMIENTO)
+# ==============================================================================
+_bootstrap_cache: Dict[int, Dict[str, Any]] = {}
+BOOTSTRAP_CACHE_TTL_SEC = 60  # 60 segundos de vigencia
+
+def invalidar_cache_bootstrap(id_local: Optional[int] = None):
+    """Invalida la caché de bootstrap cuando se registran recepciones o producciones."""
+    if id_local:
+        _bootstrap_cache.pop(id_local, None)
+    else:
+        _bootstrap_cache.clear()
+
+
+# ==============================================================================
 # MODELOS PYDANTIC DE ENTRADA Y SALIDA
 # ==============================================================================
 class EventoSyncItem(BaseModel):
@@ -84,7 +98,13 @@ def get_bootstrap_local(id_local: int):
     - Datos del local.
     - Catálogo completo de recetas e ingredientes.
     - Lotes y stock activo del local ordenados bajo criterio FEFO.
+    Usa caché en memoria de 60s para respuestas ultra-rápidas (< 5ms).
     """
+    ahora = datetime.now(timezone.utc).timestamp()
+    cached = _bootstrap_cache.get(id_local)
+    if cached and (ahora - cached["timestamp"]) < BOOTSTRAP_CACHE_TTL_SEC:
+        return cached["data"]
+
     # 1. Validar existencia del local
     df_locales = db.load_locales()
     local_match = df_locales[df_locales["id_local"] == id_local]
@@ -187,7 +207,7 @@ def get_bootstrap_local(id_local: int):
         for _, row in df_usuarios.iterrows()
     ]
 
-    return {
+    payload = {
         "id_local": id_local,
         "nombre_local": nombre_local,
         "timestamp_snapshot": datetime.now(timezone.utc).isoformat(),
@@ -199,6 +219,11 @@ def get_bootstrap_local(id_local: int):
         "productos": productos,
         "usuarios": usuarios,
     }
+    _bootstrap_cache[id_local] = {
+        "timestamp": ahora,
+        "data": payload,
+    }
+    return payload
 
 
 @app.post("/api/sync", tags=["Sincronización por Lote"])
@@ -414,6 +439,9 @@ def sync_batch(lote: LoteSyncRequest):
                     {"id_evento": ev_uuid, "err": str(ex)},
                 )
             errores.append({"id_evento": ev_uuid, "error": str(ex)})
+
+    if procesados > 0:
+        invalidar_cache_bootstrap(lote.id_local)
 
     return {
         "status": "completado",

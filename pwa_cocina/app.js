@@ -111,12 +111,12 @@ const app = {
     const selTurno = document.getElementById('sel-turno');
     selTurno.addEventListener('change', (e) => state.turno = e.target.value);
 
-    // Cargar datos (Bootstrap si hay red, o caché IndexedDB si offline)
-    await this.cargarBootstrap(state.idLocal);
+    // 1. CARGA LOCAL-FIRST INSTANTÁNEA (< 15ms): Renderizar inmediatamente desde IndexedDB local
+    await this.cargarDesdeIndexedDB();
     await this.actualizarContadorOutbox();
     this.evaluarConectividad();
 
-    // Inicializar Modo Operativo (HUB: Cocina vs Bodega)
+    // 2. Inicializar Modo Operativo (HUB: Cocina vs Bodega) de forma instantánea
     const paramModo = urlParams.get('modo');
     const modoGuardado = localStorage.getItem('mamaqocha_modo_activo');
 
@@ -133,17 +133,49 @@ const app = {
     } else {
       this.abrirHub();
     }
+
+    // 3. REVALIDACIÓN EN SEGUNDO PLANO (Stale-While-Revalidate):
+    // No congela la pantalla táctil. Actualiza en segundo plano el inventario más reciente del servidor.
+    this.sincronizarBootstrap(state.idLocal, false);
   },
 
   // ----------------------------------------------------------------------------
   // CARGA DE DATOS: SNAPSHOT INICIAL O RESTAURACIÓN OFFLINE
   // ----------------------------------------------------------------------------
-  async cargarBootstrap(idLocal) {
+  async cargarDesdeIndexedDB() {
+    try {
+      const recetasLocales = await dbLocal.recetas.toArray();
+      state.proveedoresList = await dbLocal.proveedores.toArray();
+      state.productosList = await dbLocal.productos.toArray();
+      state.usuariosList = await dbLocal.usuarios.toArray();
+      const cfgNombre = await dbLocal.config.get('nombre_local');
+      const cfgSnap = await dbLocal.config.get('timestamp_snapshot');
+
+      state.nombreLocal = cfgNombre ? cfgNombre.valor : `Local ${state.idLocal}`;
+      const elNombre = document.getElementById('txt-nombre-local');
+      if (elNombre) elNombre.textContent = state.nombreLocal;
+
+      const elSnap = document.getElementById('txt-snapshot-time');
+      if (elSnap) elSnap.textContent = cfgSnap ? new Date(cfgSnap.valor).toLocaleTimeString() : 'Local Cache';
+
+      if (recetasLocales && recetasLocales.length > 0) {
+        state.recetasList = recetasLocales;
+        this.renderSelectoresUsuarios();
+        await this.actualizarStockLocal();
+      }
+    } catch (err) {
+      console.warn('[Local-First] Error leyendo IndexedDB:', err);
+    }
+  },
+
+  async sincronizarBootstrap(idLocal, forzarNotificacion = false) {
     const isRedReal = navigator.onLine && !state.simulacionOfflineForzada;
 
     if (isRedReal) {
       try {
-        this.mostrarToast('🌐 Conectando', 'Descargando snapshot del local...', 'info');
+        if (forzarNotificacion) {
+          this.mostrarToast('🌐 Conectando', 'Descargando datos del local...', 'info');
+        }
         const resp = await fetch(`/api/bootstrap/${idLocal}`, { cache: 'no-store' });
         if (!resp.ok) throw new Error('Respuesta HTTP inválida');
         
@@ -151,8 +183,10 @@ const app = {
         
         // Guardar configuración y metadatos
         state.nombreLocal = data.nombre_local;
-        document.getElementById('txt-nombre-local').textContent = state.nombreLocal;
-        document.getElementById('txt-snapshot-time').textContent = new Date(data.timestamp_snapshot).toLocaleTimeString();
+        const elNombre = document.getElementById('txt-nombre-local');
+        if (elNombre) elNombre.textContent = state.nombreLocal;
+        const elSnap = document.getElementById('txt-snapshot-time');
+        if (elSnap) elSnap.textContent = new Date(data.timestamp_snapshot).toLocaleTimeString();
 
         await dbLocal.config.put({ clave: 'id_local', valor: idLocal });
         await dbLocal.config.put({ clave: 'nombre_local', valor: data.nombre_local });
@@ -189,39 +223,35 @@ const app = {
         state.recetasList = data.recetas;
         this.renderSelectoresUsuarios();
         await this.actualizarStockLocal();
-        this.mostrarToast('✅ Datos Sincronizados', `Recetas: ${data.total_recetas} • Lotes: ${data.total_lotes_disponibles}`, 'success');
+        this.renderMenu();
+        if (state.modoActivo === 'bodega') {
+          this.renderBodegaStock();
+        }
+
+        if (forzarNotificacion) {
+          this.mostrarToast('✅ Datos Sincronizados', `Recetas: ${data.total_recetas} • Lotes: ${data.total_lotes_disponibles}`, 'success');
+        }
         return;
       } catch (err) {
-        console.warn('[Bootstrap] Falla de red, recurriendo a base local:', err);
+        console.warn('[Bootstrap] Falla de red en sincronización:', err);
       }
     }
 
     // MODO OFFLINE / FALLBACK A INDEXEDDB LOCAL
-    const recetasLocales = await dbLocal.recetas.toArray();
-    const stockLocal = await dbLocal.stock_lotes.toArray();
-    state.proveedoresList = await dbLocal.proveedores.toArray();
-    state.productosList = await dbLocal.productos.toArray();
-    state.usuariosList = await dbLocal.usuarios.toArray();
-    const cfgNombre = await dbLocal.config.get('nombre_local');
-    const cfgSnap = await dbLocal.config.get('timestamp_snapshot');
-
-    state.nombreLocal = cfgNombre ? cfgNombre.valor : `Local ${idLocal}`;
-    document.getElementById('txt-nombre-local').textContent = state.nombreLocal;
-    document.getElementById('txt-snapshot-time').textContent = cfgSnap ? new Date(cfgSnap.valor).toLocaleTimeString() : 'Local Cache';
-
-    if (recetasLocales.length > 0) {
-      state.recetasList = recetasLocales;
-      this.renderSelectoresUsuarios();
-      await this.actualizarStockLocal();
-      this.mostrarToast('📦 Modo Autónomo', 'Cargado desde caché local (IndexedDB)', 'warning');
-    } else {
-      document.getElementById('grid-platos').innerHTML = `
-        <div class="col-span-full text-center py-20 text-gray-400">
-          <p class="text-3xl mb-2">📡</p>
-          <p class="font-bold">Sin datos locales previos</p>
-          <p class="text-xs text-gray-500 mt-1">Conecta a internet al menos 3 segundos para inicializar el local.</p>
-        </div>
-      `;
+    if (!state.recetasList || state.recetasList.length === 0) {
+      await this.cargarDesdeIndexedDB();
+      if (!state.recetasList || state.recetasList.length === 0) {
+        const grid = document.getElementById('grid-platos');
+        if (grid) {
+          grid.innerHTML = `
+            <div class="col-span-full text-center py-20 text-gray-400">
+              <p class="text-3xl mb-2">📡</p>
+              <p class="font-bold">Sin datos locales previos</p>
+              <p class="text-xs text-gray-500 mt-1">Conecta a internet al menos 3 segundos para inicializar el local.</p>
+            </div>
+          `;
+        }
+      }
     }
   },
 
@@ -1540,7 +1570,7 @@ const app = {
     state.idLocal = parseInt(nuevoId, 10);
     state.idChefActivo = null;
     this.limpiarComanda();
-    this.cargarBootstrap(state.idLocal);
+    this.sincronizarBootstrap(state.idLocal, true);
   },
 
   mostrarToast(titulo, mensaje, tipo = 'info') {
