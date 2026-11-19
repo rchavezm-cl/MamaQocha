@@ -2228,6 +2228,24 @@ if os.path.exists(manual_pdf_path):
         on_click="ignore",
     )
 
+manuales_dir = os.path.join(os.path.dirname(__file__), "manuales")
+if os.path.isdir(manuales_dir):
+    poe_pdfs = sorted(f for f in os.listdir(manuales_dir) if f.lower().endswith(".pdf"))
+    if poe_pdfs:
+        with st.sidebar.expander(f"📋 Manuales POE ({len(poe_pdfs)} PDFs)", expanded=False):
+            for fname in poe_pdfs:
+                fpath = os.path.join(manuales_dir, fname)
+                short_lbl = fname.replace(".pdf", "").replace("_", " ")
+                st.download_button(
+                    label=f"⬇️ {short_lbl}",
+                    data=lambda _p=fpath: _c_manual_pdf_bytes(_p),
+                    file_name=fname,
+                    mime="application/pdf",
+                    width="stretch",
+                    key=f"dl_poe_{fname}",
+                    on_click="ignore",
+                )
+
 st.sidebar.caption("Proyecto Académico Demo Funcional")
 
 # ==============================================================================
