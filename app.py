@@ -81,6 +81,12 @@ def _c_resumen_metricas(id_local: Optional[int] = None) -> dict:
     return db.calcular_resumen_metricas_df(_c_inventario_alertas(id_local=id_local))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_doh_locales() -> pd.DataFrame:
+    """Consulta única de DOH (Days on Hand) por sucursal basada en stock activo y salidas de cocina."""
+    return db.load_doh_locales()
+
+
 @st.cache_data(show_spinner=False)
 def _c_manual_pdf_bytes(path: str) -> bytes:
     with open(path, "rb") as f_pdf:
@@ -2079,11 +2085,76 @@ if locales_df.empty:
     st.stop()
 
 # ==============================================================================
-# SIDEBAR: EMULACIÓN DE SESIÓN MULTI-LOCAL
+# CONTROL DE ACCESO Y PERFILES DE USUARIO (RBAC)
+# ==============================================================================
+PERMISOS_POR_ROL: dict[str, list[str]] = {
+    "administrador": ["alertas", "recepcion", "cocina", "traslados", "mermas", "trazabilidad", "reportes", "maestros"],
+    "jefe_cocina": ["alertas", "cocina", "traslados", "mermas", "trazabilidad", "reportes"],
+    "bodeguero": ["alertas", "recepcion", "traslados", "trazabilidad"],
+    "cocinero": ["alertas", "cocina", "mermas"],
+    "operador": ["alertas", "trazabilidad"],
+    "cajero_garzon": ["alertas", "trazabilidad"],
+}
+
+if "auth_user" not in st.session_state or not st.session_state["auth_user"]:
+    st.markdown(
+        """
+        <style>
+            [data-testid="stSidebar"] { display: none; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, col_login, _ = st.columns([1.1, 1.2, 1.1])
+    with col_login:
+        st.markdown("<div style='height: 36px;'></div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div style='text-align:center; padding: 6px 0 10px 0;'>
+                    <h2 style='margin:0; color:#0d2b45;'>🦙 Mamá Qocha</h2>
+                    <p style='margin:4px 0 0 0; font-size:0.9rem; color:#64748b;'>
+                        Sistema de Trazabilidad, FEFO y Control de Mermas
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.form("form_login_frontend", clear_on_submit=False):
+                usuario_input = st.text_input(
+                    "👤 Nombre de usuario",
+                    placeholder="Ej: admin_demo, cmendoza_l1, rhuaman_l1",
+                )
+                pass_input = st.text_input(
+                    "🔑 Contraseña / PIN Cocina",
+                    type="password",
+                    placeholder="Ingresa tu contraseña o PIN",
+                )
+                submitted_login = st.form_submit_button("🔐 Iniciar Sesión", use_container_width=True, type="primary")
+                if submitted_login:
+                    if not hasattr(db, "autenticar_usuario"):
+                        import importlib
+                        importlib.reload(db)
+                    usr_auth = db.autenticar_usuario(usuario_input, pass_input)
+                    if usr_auth is not None:
+                        st.session_state["auth_user"] = usr_auth
+                        st.session_state.pop("nav_modulo_principal", None)
+                        st.rerun()
+                    else:
+                        st.error("❌ Usuario o contraseña/PIN incorrectos, o usuario inactivo.")
+            st.caption("Usa el mismo usuario y PIN asignados al panel táctil de cocina.")
+    st.stop()
+
+auth_user = st.session_state["auth_user"]
+rol_activo = auth_user["rol"]
+id_local_usuario = auth_user["id_local"]
+
+# ==============================================================================
+# SIDEBAR: SESIÓN AUTENTICADA Y ALCANCE POR LOCAL
 # ==============================================================================
 st.sidebar.markdown(
     """
-    <div style='text-align: center; padding: 10px 0 15px 0;'>
+    <div style='text-align: center; padding: 10px 0 10px 0;'>
         <h2 style='margin:0; font-size:1.5rem; color:#0d2b45;'>🦙 Mamá Qocha</h2>
         <p style='margin:0; font-size:0.8rem; color:#64748b;'>Gestión de Trazabilidad y Stock</p>
     </div>
@@ -2091,34 +2162,52 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-st.sidebar.markdown("### 🏢 Simulación de Local")
-
-opciones_locales = {"0": "🌐 Vista Consolidada (Administrador)"}
-opciones_locales_pills = {"0": "🌐 Todos (5)"}
-for _, fila in locales_df.iterrows():
-    lid_str = str(fila["id_local"])
-    opciones_locales[lid_str] = f"📍 {fila['nombre']}"
-    opciones_locales_pills[lid_str] = f"📍 {fila['nombre']}"
-
-seleccion_local_key = _select_pills(
-    "Local Activo en Pantalla:",
-    opciones_locales_pills,
-    key="sidebar_local_pills",
-    default_key="0",
-    container=st.sidebar,
+st.sidebar.markdown(
+    f"""
+    <div style='background:#f8fafc; border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; margin-bottom:10px;'>
+        <div style='font-size:0.72rem; font-weight:700; color:#64748b; text-transform:uppercase;'>Sesión Activa</div>
+        <div style='font-size:0.98rem; font-weight:700; color:#0f172a; margin-top:2px;'>👤 {auth_user['nombre']}</div>
+        <div style='font-size:0.8rem; color:#0369a1; font-weight:600;'>🛡️ {rol_activo.replace('_', ' ').title()}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
+if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+    st.session_state.pop("auth_user", None)
+    st.session_state.pop("nav_modulo_principal", None)
+    st.rerun()
 
-id_local_activo: Optional[int] = (
-    int(seleccion_local_key) if seleccion_local_key != "0" else None
-)
-nombre_local_activo = (
-    opciones_locales[seleccion_local_key].replace("📍 ", "").replace("🌐 ", "")
-)
+if rol_activo == "administrador" and id_local_usuario is None:
+    st.sidebar.markdown("### 🏢 Filtro de Sucursal")
+    opciones_locales = {"0": "🌐 Vista Consolidada (Administrador)"}
+    opciones_locales_pills = {"0": "🌐 Todos (5)"}
+    for _, fila in locales_df.iterrows():
+        lid_str = str(fila["id_local"])
+        opciones_locales[lid_str] = f"📍 {fila['nombre']}"
+        opciones_locales_pills[lid_str] = f"📍 {fila['nombre']}"
 
-if id_local_activo:
-    st.sidebar.success(f"Sesión activa: **{nombre_local_activo}**")
+    seleccion_local_key = _select_pills(
+        "Local Activo en Pantalla:",
+        opciones_locales_pills,
+        key="sidebar_local_pills",
+        default_key="0",
+        container=st.sidebar,
+    )
+
+    id_local_activo: Optional[int] = (
+        int(seleccion_local_key) if seleccion_local_key != "0" else None
+    )
+    nombre_local_activo = (
+        opciones_locales[seleccion_local_key].replace("📍 ", "").replace("🌐 ", "")
+    )
+    if id_local_activo:
+        st.sidebar.success(f"Vista filtrada: **{nombre_local_activo}**")
+    else:
+        st.sidebar.info("Modo activo: **Consolidado General (5 Locales)**")
 else:
-    st.sidebar.info("Modo activo: **Consolidado General (5 Locales)**")
+    id_local_activo = int(id_local_usuario) if id_local_usuario is not None else None
+    nombre_local_activo = auth_user["nombre_local"]
+    st.sidebar.info(f"📍 Sucursal asignada: **{nombre_local_activo}**")
 
 
 def get_opciones_usuarios(
@@ -2148,19 +2237,8 @@ def get_opciones_usuarios(
     return opciones, idx
 
 
-opciones_usr_sesion, _ = get_opciones_usuarios(id_local_activo)
-if opciones_usr_sesion:
-    id_usuario_sesion: Optional[int] = st.sidebar.selectbox(
-        "👤 Operador en Sesión:",
-        options=list(opciones_usr_sesion.keys()),
-        format_func=lambda k: opciones_usr_sesion[k],
-        key="sel_usuario_sesion_sidebar",
-        help="Firma por defecto preseleccionada en recepciones, despachos, cocina y mermas.",
-    )
-    nombre_usuario_sesion = opciones_usr_sesion[id_usuario_sesion]
-else:
-    id_usuario_sesion = None
-    nombre_usuario_sesion = "Operador Central"
+id_usuario_sesion: Optional[int] = int(auth_user["id_usuario"])
+nombre_usuario_sesion: str = f"{auth_user['nombre']} ({rol_activo.replace('_', ' ').title()})"
 
 st.sidebar.markdown("---")
 
@@ -2271,6 +2349,11 @@ st.markdown(
             </div>
             <div class="hero-pulse-hud">
                 <div class="hero-pulse-item">
+                    <span class="hero-pulse-label">Usuario Activo</span>
+                    <span class="hero-pulse-val" style="color:#f8fafc;">👤 {auth_user['nombre']} <span style="font-size:0.75rem; color:#94a3b8; font-weight:500;">({rol_activo.replace('_', ' ').title()})</span></span>
+                </div>
+                <div class="hero-pulse-divider"></div>
+                <div class="hero-pulse-item">
                     <span class="hero-pulse-label">Vista Operativa</span>
                     <span class="hero-pulse-val" style="color:#38bdf8;">{modo_badge}</span>
                 </div>
@@ -2291,7 +2374,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Navegación principal perezosa (solo ejecuta consultas de la vista activa)
+# Navegación principal perezosa filtrada por perfil de usuario (RBAC)
 NAV_MODULOS = {
     "alertas": "🚦 Semáforo & Riesgo",
     "recepcion": "📥 Recepción",
@@ -2302,9 +2385,14 @@ NAV_MODULOS = {
     "reportes": "🖨️ Reportes PDF",
     "maestros": "⚙️ Maestros",
 }
+modulos_permitidos = PERMISOS_POR_ROL.get(rol_activo, ["alertas"])
+NAV_MODULOS_PERMITIDOS = {k: v for k, v in NAV_MODULOS.items() if k in modulos_permitidos}
+if st.session_state.get("nav_modulo_principal") not in NAV_MODULOS_PERMITIDOS:
+    st.session_state["nav_modulo_principal"] = "alertas"
+
 nav_tab = _select_pills(
     "Módulo Activo:",
-    NAV_MODULOS,
+    NAV_MODULOS_PERMITIDOS,
     key="nav_modulo_principal",
     default_key="alertas",
     label_visibility="collapsed",
@@ -2612,7 +2700,25 @@ if nav_tab == "alertas":
         total_kg_stock = float(inventario_df["cantidad"].sum()) if not inventario_df.empty else 0.0
         porciones_totales_estimadas = int(total_kg_stock / 0.220) if total_kg_stock > 0 else 0
 
-        col_ex1, col_ex2, col_ex3, col_ex4 = st.columns(4)
+        df_doh_locales = _c_doh_locales()
+        resumen_doh = db.calcular_doh_resumen(df_doh_locales, id_local=id_local_activo)
+        doh_val = resumen_doh["doh_dias"]
+        platos_dia_val = resumen_doh["platos_dia_est"]
+        doh_meta = resumen_doh["doh_meta"]
+        if doh_val <= 0:
+            doh_tag_bg, doh_tag_fg, doh_tag_bd = "#f1f5f9", "#475569", "#cbd5e1"
+            doh_icon_bg = "linear-gradient(135deg, #64748b 0%, #475569 100%)"
+        elif doh_val <= 15:
+            doh_tag_bg, doh_tag_fg, doh_tag_bd = "#ecfdf5", "#047857", "#a7f3d0"
+            doh_icon_bg = "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+        elif doh_val <= 30:
+            doh_tag_bg, doh_tag_fg, doh_tag_bd = "#fefce8", "#a16207", "#fef08a"
+            doh_icon_bg = "linear-gradient(135deg, #f59e0b 0%, #d97706 100%)"
+        else:
+            doh_tag_bg, doh_tag_fg, doh_tag_bd = "#fef2f2", "#b91c1c", "#fecaca"
+            doh_icon_bg = "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)"
+
+        col_ex1, col_ex2, col_ex3, col_ex4, col_ex5 = st.columns(5)
 
         with col_ex1:
             st.markdown(
@@ -2683,6 +2789,25 @@ if nav_tab == "alertas":
                     <div>
                         <span class="op-kpi-tag" style="background:#eef2ff; color:#4338ca; border:1px solid #c7d2fe;">
                             ↑ {total_kg_stock:.1f} kg activos
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with col_ex5:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-head">
+                        <div class="op-kpi-icon-box" style="background:{doh_icon_bg}; color:#ffffff;">⏱️</div>
+                        <span class="op-kpi-title">DOH Inventario {'Global' if id_local_activo is None else 'Local'}</span>
+                    </div>
+                    <div class="op-kpi-val">{doh_val:.1f} <span style="font-size:0.82rem; font-weight:600; color:#64748b;">días</span></div>
+                    <div>
+                        <span class="op-kpi-tag" style="background:{doh_tag_bg}; color:{doh_tag_fg}; border:1px solid {doh_tag_bd};">
+                            ~{platos_dia_val:,.0f} platos/d · Meta ≤ {doh_meta:.0f} d
                         </span>
                     </div>
                 </div>
@@ -2947,6 +3072,139 @@ if nav_tab == "alertas":
                         pct_val = fila_rk["% Riesgo"]
                         icono_sem = "🔴" if pct_val > 20 else ("🟠" if pct_val > 0 else "🟢")
                         st.write(f"{icono_sem} **{loc_nombre}**: ${rsk_val:,.0f} CLP *({pct_val:.1f}% en riesgo)*")
+
+            if not df_doh_locales.empty:
+                st.markdown("---")
+                st.markdown("#### ⏱️ DOH (Days on Hand) Global y por Sucursal")
+                st.caption(
+                    "Cobertura real de inventario (`Stock Activo kg ÷ Consumo Promedio Diario en Cocina`) "
+                    "frente a la meta Lean de ≤ 12 días. Permite detectar sobre-stock por caída de demanda "
+                    "(ej. baja de 600 a 310 platos/día) antes de que los lotes entren en riesgo de merma."
+                )
+
+                resumen_doh_global = db.calcular_doh_resumen(df_doh_locales, id_local=None)
+                col_doh1, col_doh2 = st.columns([1.2, 1.3])
+
+                with col_doh1:
+                    with st.container(border=True):
+                        st.markdown("##### 📊 Cobertura DOH por Sucursal vs. Global (días)")
+                        etiquetas_doh = ["🌐 Global Cadena"] + df_doh_locales["local"].tolist()
+                        valores_doh = [round(resumen_doh_global["doh_dias"], 1)] + [
+                            round(float(v), 1) for v in df_doh_locales["doh_dias"].tolist()
+                        ]
+
+                        def _color_barra_doh(val: float) -> str:
+                            if val <= 15:
+                                return "#10b981"
+                            if val <= 30:
+                                return "#f59e0b"
+                            return "#ef4444"
+
+                        datos_barra_doh = [
+                            {
+                                "value": v,
+                                "itemStyle": {
+                                    "color": "#0d2b45" if idx == 0 else _color_barra_doh(v),
+                                    "borderRadius": [0, 6, 6, 0],
+                                },
+                            }
+                            for idx, v in enumerate(valores_doh)
+                        ]
+
+                        option_doh = {
+                            "tooltip": {
+                                "trigger": "axis",
+                                "axisPointer": {"type": "shadow"},
+                                "formatter": "{b}: <b>{c} días</b>",
+                            },
+                            "grid": {
+                                "left": "3%",
+                                "right": "14%",
+                                "bottom": "4%",
+                                "top": "8%",
+                                "containLabel": True,
+                            },
+                            "xAxis": {
+                                "type": "value",
+                                "axisLabel": {"formatter": "{value} d"},
+                                "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                            },
+                            "yAxis": {
+                                "type": "category",
+                                "inverse": True,
+                                "data": etiquetas_doh,
+                                "axisLabel": {"color": "#334155", "fontSize": 11},
+                            },
+                            "series": [
+                                {
+                                    "name": "DOH (días)",
+                                    "type": "bar",
+                                    "data": datos_barra_doh,
+                                    "label": {
+                                        "show": True,
+                                        "position": "right",
+                                        "formatter": "{c} d",
+                                        "color": "#0f172a",
+                                        "fontWeight": "bold",
+                                        "fontSize": 11,
+                                    },
+                                    "markLine": {
+                                        "symbol": "none",
+                                        "lineStyle": {"type": "dashed", "color": "#059669", "width": 2},
+                                        "label": {"formatter": "Meta Lean: 12 d", "position": "insideEndTop"},
+                                        "data": [{"xAxis": 12}],
+                                    },
+                                }
+                            ],
+                        }
+                        render_echarts(option_doh, height=270, key="bar_doh_sucursales")
+
+                with col_doh2:
+                    with st.container(border=True):
+                        st.markdown("##### 📋 Detalle Operativo de Rotación y Platos/Día")
+                        df_doh_view = df_doh_locales[
+                            ["local", "kg_stock", "consumo_diario_kg", "platos_dia_est", "doh_dias", "estado_doh"]
+                        ].copy()
+                        fila_global = pd.DataFrame(
+                            [
+                                {
+                                    "local": "🌐 Global Cadena",
+                                    "kg_stock": resumen_doh_global["kg_stock"],
+                                    "consumo_diario_kg": resumen_doh_global["consumo_diario_kg"],
+                                    "platos_dia_est": resumen_doh_global["platos_dia_est"],
+                                    "doh_dias": resumen_doh_global["doh_dias"],
+                                    "estado_doh": (
+                                        "🟢 Óptimo (≤ 15 d)"
+                                        if 0 < resumen_doh_global["doh_dias"] <= 15
+                                        else (
+                                            "🟡 Preventivo (15-30 d)"
+                                            if 15 < resumen_doh_global["doh_dias"] <= 30
+                                            else "🔴 Sobre-stock (> 30 d)"
+                                        )
+                                    ),
+                                }
+                            ]
+                        )
+                        df_doh_tabla = pd.concat([fila_global, df_doh_view], ignore_index=True)
+                        df_doh_tabla.columns = [
+                            "Sucursal",
+                            "Stock (kg)",
+                            "Consumo/día (kg)",
+                            "Platos/día est.",
+                            "DOH (días)",
+                            "Estado DOH",
+                        ]
+                        st.dataframe(
+                            df_doh_tabla,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Stock (kg)": st.column_config.NumberColumn(format="%.1f kg"),
+                                "Consumo/día (kg)": st.column_config.NumberColumn(format="%.2f kg/d"),
+                                "Platos/día est.": st.column_config.NumberColumn(format="%.0f platos/d"),
+                                "DOH (días)": st.column_config.NumberColumn(format="%.1f d"),
+                            },
+                        )
 
     # --------------------------------------------------------------------------
     # SUB-TAB B: OPORTUNIDADES & RESCATE EN CARTA (PLAN DE CHOQUE)

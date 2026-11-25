@@ -73,6 +73,53 @@ def load_usuarios(id_local: Optional[int] = None, solo_activos: bool = True) -> 
         return pd.read_sql(query, connection, params={"id_local": id_local} if id_local else {})
 
 
+def autenticar_usuario(nombre_usuario: str, password: str) -> Optional[Dict[str, Any]]:
+    """Valida credenciales de usuario contra hash_password o PIN táctil de cocina."""
+    usuario_limpio = (nombre_usuario or "").strip()
+    pass_limpio = (password or "").strip()
+    if not usuario_limpio or not pass_limpio:
+        return None
+
+    query = text(
+        """
+        SELECT
+            u.id_usuario,
+            u.nombre,
+            u.nombre_usuario,
+            u.rol,
+            u.id_local,
+            u.pin,
+            u.hash_password,
+            COALESCE(l.nombre, 'Consolidado (Todos los locales)') AS nombre_local
+        FROM usuarios u
+        LEFT JOIN locales l ON l.id_local = u.id_local
+        WHERE LOWER(u.nombre_usuario) = LOWER(:usuario)
+          AND u.activo = TRUE
+        LIMIT 1
+        """
+    )
+    with engine.connect() as connection:
+        row = connection.execute(query, {"usuario": usuario_limpio}).mappings().first()
+
+    if row is None:
+        return None
+
+    hash_db = row["hash_password"]
+    pin_db = str(row["pin"] or "").strip()
+    valido = (hash_db == pass_limpio) if hash_db else (pin_db != "" and pin_db == pass_limpio)
+    if not valido:
+        return None
+
+    return {
+        "id_usuario": int(row["id_usuario"]),
+        "nombre": str(row["nombre"]),
+        "nombre_usuario": str(row["nombre_usuario"]),
+        "rol": str(row["rol"]),
+        "id_local": int(row["id_local"]) if row["id_local"] is not None else None,
+        "nombre_local": str(row["nombre_local"]),
+    }
+
+
 def crear_usuario(
     nombre: str,
     nombre_usuario: str,
@@ -426,6 +473,117 @@ def calcular_resumen_metricas_df(inv: pd.DataFrame) -> Dict[str, Any]:
 def load_resumen_metricas(id_local: Optional[int] = None) -> Dict[str, Any]:
     """Obtiene métricas cuantitativas y financieras de stock y alertas para el local o consolidado."""
     return calcular_resumen_metricas_df(load_inventario_alertas(id_local))
+
+
+KG_POR_PLATO_ESTANDAR = 0.220
+DOH_META_DIAS = 12.0
+
+
+def load_doh_locales() -> pd.DataFrame:
+    """Calcula stock activo, consumo promedio diario en cocina y DOH (Days on Hand) por local."""
+    query = text(
+        """
+        SELECT
+            loc.id_local,
+            loc.nombre AS local,
+            COALESCE(s.kg_stock, 0)::numeric(12,3) AS kg_stock,
+            COALESCE(s.valor_stock, 0)::numeric(14,2) AS valor_stock,
+            COALESCE(m.kg_consumo, 0)::numeric(12,3) AS kg_consumo_total,
+            COALESCE(m.dias_activos, 0) AS dias_observados,
+            COALESCE(m.num_salidas, 0) AS num_salidas
+        FROM locales loc
+        LEFT JOIN (
+            SELECT
+                st.id_local,
+                SUM(st.cantidad) AS kg_stock,
+                SUM(st.cantidad * COALESCE(dc.costo_unitario, 0)) AS valor_stock
+            FROM stock_lote_local st
+            JOIN lotes lt ON lt.id_lote = st.id_lote
+            JOIN detalle_compra dc ON dc.id_detalle_compra = lt.id_detalle_compra
+            WHERE st.cantidad > 0
+            GROUP BY st.id_local
+        ) s ON s.id_local = loc.id_local
+        LEFT JOIN (
+            SELECT
+                mov.id_local_origen AS id_local,
+                SUM(dm.cantidad) AS kg_consumo,
+                GREATEST(1, (MAX(mov.fecha_movimiento)::date - MIN(mov.fecha_movimiento)::date) + 1) AS dias_activos,
+                COUNT(DISTINCT mov.id_movimiento) AS num_salidas
+            FROM movimientos mov
+            JOIN detalle_movimiento dm ON dm.id_movimiento = mov.id_movimiento
+            WHERE mov.tipo_movimiento = 'salida_cocina'
+              AND mov.estado = 'confirmado'
+              AND COALESCE(mov.referencia, '') NOT LIKE 'MERMA:%'
+            GROUP BY mov.id_local_origen
+        ) m ON m.id_local = loc.id_local
+        WHERE loc.activo = TRUE
+        ORDER BY loc.id_local;
+        """
+    )
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+
+    if df.empty:
+        return df
+
+    for col in ("kg_stock", "valor_stock", "kg_consumo_total"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+    df["dias_observados"] = pd.to_numeric(df["dias_observados"], errors="coerce").fillna(0).astype(int)
+    df["num_salidas"] = pd.to_numeric(df["num_salidas"], errors="coerce").fillna(0).astype(int)
+
+    df["consumo_diario_kg"] = df.apply(
+        lambda r: (r["kg_consumo_total"] / r["dias_observados"]) if r["dias_observados"] > 0 else 0.0,
+        axis=1,
+    )
+    df["platos_dia_est"] = df["consumo_diario_kg"] / KG_POR_PLATO_ESTANDAR
+    df["doh_dias"] = df.apply(
+        lambda r: (r["kg_stock"] / r["consumo_diario_kg"]) if r["consumo_diario_kg"] > 0 else 0.0,
+        axis=1,
+    )
+    df["estado_doh"] = df["doh_dias"].apply(
+        lambda d: "🟢 Óptimo (≤ 15 d)"
+        if 0 < d <= 15
+        else ("🟡 Preventivo (15-30 d)" if 15 < d <= 30 else ("🔴 Sobre-stock (> 30 d)" if d > 30 else "⚪ Sin consumo"))
+    )
+    return df
+
+
+def calcular_doh_resumen(df_doh: pd.DataFrame, id_local: Optional[int] = None) -> Dict[str, Any]:
+    """Deriva el resumen KPI de DOH (global o filtrado por sucursal) desde el DataFrame por local."""
+    if df_doh is None or df_doh.empty:
+        return {
+            "doh_dias": 0.0,
+            "kg_stock": 0.0,
+            "consumo_diario_kg": 0.0,
+            "platos_dia_est": 0.0,
+            "doh_meta": DOH_META_DIAS,
+            "es_global": id_local is None,
+        }
+
+    subset = df_doh if id_local is None else df_doh[df_doh["id_local"] == int(id_local)]
+    if subset.empty:
+        return {
+            "doh_dias": 0.0,
+            "kg_stock": 0.0,
+            "consumo_diario_kg": 0.0,
+            "platos_dia_est": 0.0,
+            "doh_meta": DOH_META_DIAS,
+            "es_global": id_local is None,
+        }
+
+    kg_stock = float(subset["kg_stock"].sum())
+    consumo_diario_kg = float(subset["consumo_diario_kg"].sum())
+    doh_dias = (kg_stock / consumo_diario_kg) if consumo_diario_kg > 0 else 0.0
+    platos_dia_est = consumo_diario_kg / KG_POR_PLATO_ESTANDAR if consumo_diario_kg > 0 else 0.0
+
+    return {
+        "doh_dias": doh_dias,
+        "kg_stock": kg_stock,
+        "consumo_diario_kg": consumo_diario_kg,
+        "platos_dia_est": platos_dia_est,
+        "doh_meta": DOH_META_DIAS,
+        "es_global": id_local is None,
+    }
 
 
 def load_lotes_selector() -> pd.DataFrame:
