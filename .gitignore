@@ -7,3 +7,13 @@ venv/
 .neon
 node_modules/
 sincronizar_a_nube.py
+
+# Material de defensa y documentos locales
+DIAGRAMA_EJECUTIVO_COMISION_EVALUADORA.md
+DIAGRAMA_FLUJOS_LOCALES_STREAMLIT_NEON.md
+Defensa.Web.html
+Defensa_Mama_Qocha_INACAP.pptx
+Guion_Tecnico_Defensa_Oral_Mama_Qocha.docx
+Respaldo_Matematico_Lamina_8.pdf
+Respaldo_Matematico_Lamina_8.xlsx
+manuales/*.docx
