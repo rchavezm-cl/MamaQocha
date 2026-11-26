@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -32,8 +32,8 @@ elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("p
 # Crear el motor de SQLAlchemy con pool dimensionado para consultas paralelas y reconexión en Postgres serverless
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
+    pool_pre_ping=False,
+    pool_recycle=120,
     pool_size=10,
     max_overflow=10,
 )
@@ -548,6 +548,81 @@ def load_doh_locales() -> pd.DataFrame:
     return df
 
 
+def load_doh_productos_locales() -> pd.DataFrame:
+    """Calcula stock activo, consumo promedio diario y DOH (días) por local y producto."""
+    query = text(
+        """
+        WITH ventana_local AS (
+            SELECT
+                mov.id_local_origen AS id_local,
+                GREATEST(1, (MAX(mov.fecha_movimiento)::date - MIN(mov.fecha_movimiento)::date) + 1) AS dias_activos
+            FROM movimientos mov
+            WHERE mov.tipo_movimiento = 'salida_cocina'
+              AND mov.estado = 'confirmado'
+              AND COALESCE(mov.referencia, '') NOT LIKE 'MERMA:%'
+            GROUP BY mov.id_local_origen
+        ),
+        stock_prod AS (
+            SELECT
+                st.id_local,
+                dc.id_producto,
+                SUM(st.cantidad) AS kg_stock
+            FROM stock_lote_local st
+            JOIN lotes lt ON lt.id_lote = st.id_lote
+            JOIN detalle_compra dc ON dc.id_detalle_compra = lt.id_detalle_compra
+            WHERE st.cantidad > 0
+            GROUP BY st.id_local, dc.id_producto
+        ),
+        consumo_prod AS (
+            SELECT
+                mov.id_local_origen AS id_local,
+                dc.id_producto,
+                SUM(dm.cantidad) AS kg_consumo
+            FROM movimientos mov
+            JOIN detalle_movimiento dm ON dm.id_movimiento = mov.id_movimiento
+            JOIN lotes lt ON lt.id_lote = dm.id_lote
+            JOIN detalle_compra dc ON dc.id_detalle_compra = lt.id_detalle_compra
+            WHERE mov.tipo_movimiento = 'salida_cocina'
+              AND mov.estado = 'confirmado'
+              AND COALESCE(mov.referencia, '') NOT LIKE 'MERMA:%'
+            GROUP BY mov.id_local_origen, dc.id_producto
+        )
+        SELECT
+            loc.id_local,
+            loc.nombre AS local,
+            p.id_producto,
+            p.nombre AS producto,
+            COALESCE(sp.kg_stock, 0)::numeric(12,3) AS kg_stock,
+            COALESCE(cp.kg_consumo, 0)::numeric(12,3) AS kg_consumo_total,
+            COALESCE(vl.dias_activos, 1) AS dias_observados
+        FROM locales loc
+        CROSS JOIN productos p
+        LEFT JOIN ventana_local vl ON vl.id_local = loc.id_local
+        LEFT JOIN stock_prod sp ON sp.id_local = loc.id_local AND sp.id_producto = p.id_producto
+        LEFT JOIN consumo_prod cp ON cp.id_local = loc.id_local AND cp.id_producto = p.id_producto
+        WHERE loc.activo = TRUE
+          AND p.activo = TRUE
+          AND (COALESCE(sp.kg_stock, 0) > 0 OR COALESCE(cp.kg_consumo, 0) > 0)
+        ORDER BY loc.id_local, p.nombre;
+        """
+    )
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+
+    if df.empty:
+        return df
+
+    for col in ("kg_stock", "kg_consumo_total"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+    df["dias_observados"] = pd.to_numeric(df["dias_observados"], errors="coerce").fillna(1).astype(int)
+    df["consumo_diario_kg"] = df["kg_consumo_total"] / df["dias_observados"].clip(lower=1)
+    df["doh_dias"] = df.apply(
+        lambda r: (r["kg_stock"] / r["consumo_diario_kg"]) if r["consumo_diario_kg"] > 0 else 0.0,
+        axis=1,
+    )
+    return df
+
+
 def calcular_doh_resumen(df_doh: pd.DataFrame, id_local: Optional[int] = None) -> Dict[str, Any]:
     """Deriva el resumen KPI de DOH (global o filtrado por sucursal) desde el DataFrame por local."""
     if df_doh is None or df_doh.empty:
@@ -595,12 +670,15 @@ def load_lotes_selector() -> pd.DataFrame:
             l.codigo_lote_proveedor,
             p.nombre AS producto,
             prov.nombre AS proveedor,
+            loc.nombre AS local_receptor,
+            l.fecha_recepcion,
             l.fecha_vencimiento,
             CONCAT('Lote #', l.id_lote, ' - ', p.nombre, ' (Ref: ', l.codigo_lote_proveedor, ')') AS display_label
         FROM lotes AS l
         JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
         JOIN productos AS p ON p.id_producto = dc.id_producto
         JOIN compras AS c ON c.id_compra = dc.id_compra
+        JOIN locales AS loc ON loc.id_local = c.id_local_receptor
         JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
         ORDER BY l.id_lote DESC
         """
@@ -1545,7 +1623,8 @@ def load_ranking_platos_ventas(
             WHERE m.tipo_movimiento = 'salida_cocina'
               AND m.estado = 'confirmado'
               AND COALESCE(m.referencia, '') LIKE 'PRODUCCIÓN%'
-              AND DATE(m.fecha_movimiento) BETWEEN :fecha_inicio AND :fecha_fin
+              AND m.fecha_movimiento >= :fecha_inicio
+              AND m.fecha_movimiento < :fecha_fin_exclusivo
               {where_local}
         )
         SELECT
@@ -1567,7 +1646,7 @@ def load_ranking_platos_ventas(
     )
     params: Dict[str, Any] = {
         "fecha_inicio": fecha_inicio,
-        "fecha_fin": fecha_fin,
+        "fecha_fin_exclusivo": fecha_fin + timedelta(days=1),
         "kg_plato": KG_POR_PLATO_ESTANDAR,
     }
     if id_local:
@@ -2333,9 +2412,10 @@ def load_listado_documentos_movimiento(
 def get_movimiento_para_pdf(id_movimiento: int) -> Dict[str, Any]:
     """
     Obtiene cabecera completa y detalle completo de lotes/proveedores/manipuladores
-    para imprimir el PDF oficial de un movimiento (Acta de Merma, Guía de Traslado o Acta de Cocina).
+    para imprimir el PDF oficial de un movimiento (Acta de Merma, Guía de Traslado o Acta de Cocina)
+    en un único viaje SQL.
     """
-    q_header = text(
+    q_unificado = text(
         """
         SELECT
             m.id_movimiento,
@@ -2352,7 +2432,38 @@ def get_movimiento_para_pdf(id_movimiento: int) -> Dict[str, Any]:
             COALESCE(u_o.nombre_usuario, '-') AS username_origen,
             COALESCE(u_o.rol, 'operador') AS rol_origen,
             COALESCE(u_d.nombre, '-') AS responsable_destino,
-            COALESCE(u_d.rol, '-') AS rol_destino
+            COALESCE(u_d.rol, '-') AS rol_destino,
+            COALESCE(
+                (
+                    SELECT json_agg(t ORDER BY t.producto ASC, t.fecha_vencimiento ASC)
+                    FROM (
+                        SELECT
+                            l.id_lote,
+                            p.nombre AS producto,
+                            p.unidad_medida,
+                            l.codigo_lote_proveedor,
+                            l.fecha_vencimiento,
+                            l.fecha_recepcion,
+                            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
+                            dm.cantidad,
+                            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
+                            ROUND(dm.cantidad * COALESCE(dc.costo_unitario, 0), 2) AS costo_subtotal,
+                            prov.nombre AS proveedor,
+                            COALESCE(prov.rut, '-') AS rut_proveedor,
+                            c.tipo_documento,
+                            c.numero_documento,
+                            COALESCE(dm.observaciones, '') AS obs_detalle
+                        FROM detalle_movimiento AS dm
+                        JOIN lotes AS l ON l.id_lote = dm.id_lote
+                        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
+                        JOIN compras AS c ON c.id_compra = dc.id_compra
+                        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
+                        JOIN productos AS p ON p.id_producto = dc.id_producto
+                        WHERE dm.id_movimiento = m.id_movimiento
+                    ) AS t
+                ),
+                '[]'::json
+            ) AS items_json
         FROM movimientos AS m
         JOIN locales AS loc_o ON loc_o.id_local = m.id_local_origen
         LEFT JOIN locales AS loc_d ON loc_d.id_local = m.id_local_destino
@@ -2361,40 +2472,14 @@ def get_movimiento_para_pdf(id_movimiento: int) -> Dict[str, Any]:
         WHERE m.id_movimiento = :id_movimiento
         """
     )
-    q_items = text(
-        """
-        SELECT
-            l.id_lote,
-            p.nombre AS producto,
-            p.unidad_medida,
-            l.codigo_lote_proveedor,
-            l.fecha_vencimiento,
-            l.fecha_recepcion,
-            COALESCE(l.temperatura_recepcion, 2.0) AS temperatura_recepcion,
-            dm.cantidad,
-            COALESCE(dc.costo_unitario, 0) AS costo_unitario,
-            ROUND(dm.cantidad * COALESCE(dc.costo_unitario, 0), 2) AS costo_subtotal,
-            prov.nombre AS proveedor,
-            COALESCE(prov.rut, '-') AS rut_proveedor,
-            c.tipo_documento,
-            c.numero_documento,
-            COALESCE(dm.observaciones, '') AS obs_detalle
-        FROM detalle_movimiento AS dm
-        JOIN lotes AS l ON l.id_lote = dm.id_lote
-        JOIN detalle_compra AS dc ON dc.id_detalle_compra = l.id_detalle_compra
-        JOIN compras AS c ON c.id_compra = dc.id_compra
-        JOIN proveedores AS prov ON prov.id_proveedor = c.id_proveedor
-        JOIN productos AS p ON p.id_producto = dc.id_producto
-        WHERE dm.id_movimiento = :id_movimiento
-        ORDER BY p.nombre ASC, l.fecha_vencimiento ASC
-        """
-    )
     with engine.connect() as conn:
-        h_df = pd.read_sql(q_header, conn, params={"id_movimiento": int(id_movimiento)})
-        if h_df.empty:
-            return {}
-        items_df = pd.read_sql(q_items, conn, params={"id_movimiento": int(id_movimiento)})
-        return {"cabecera": h_df.iloc[0].to_dict(), "items": items_df}
+        row = conn.execute(q_unificado, {"id_movimiento": int(id_movimiento)}).mappings().fetchone()
+    if not row:
+        return {}
+    cabecera = {k: v for k, v in row.items() if k != "items_json"}
+    items_raw = row["items_json"] or []
+    items_df = pd.DataFrame(items_raw)
+    return {"cabecera": cabecera, "items": items_df}
 
 
 def load_listado_recepciones(

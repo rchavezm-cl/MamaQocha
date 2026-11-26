@@ -87,6 +87,12 @@ def _c_doh_locales() -> pd.DataFrame:
     return db.load_doh_locales()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_doh_productos_locales() -> pd.DataFrame:
+    """Consulta de DOH por local y producto para drill-down interactivo."""
+    return db.load_doh_productos_locales()
+
+
 @st.cache_data(show_spinner=False)
 def _c_manual_pdf_bytes(path: str) -> bytes:
     with open(path, "rb") as f_pdf:
@@ -1187,10 +1193,11 @@ def _render_quick_pdf_banner(
     except Exception as err:
         st.warning(f"No se pudo generar el PDF inmediato: {err}")
 
-def render_echarts(options: dict, height: int = 280, key: str = "chart"):
-    """Renderiza gráficos Apache ECharts nativos con soporte responsivo y animación fluida."""
+def render_echarts(options: dict, height: int = 280, key: str = "chart", drilldown_data: Optional[dict] = None):
+    """Renderiza gráficos Apache ECharts nativos con soporte responsivo, animación fluida y drill-down opcional."""
     chart_id = f"echart_{key}"
     json_options = json.dumps(options, ensure_ascii=False)
+    json_drill = json.dumps(drilldown_data or {}, ensure_ascii=False)
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -1219,8 +1226,108 @@ def render_echarts(options: dict, height: int = 280, key: str = "chart"):
             (function() {{
                 var chartDom = document.getElementById('{chart_id}');
                 var myChart = echarts.init(chartDom, null, {{ renderer: 'canvas' }});
-                var option = {json_options};
-                myChart.setOption(option);
+                var baseOption = {json_options};
+                var drillMap = {json_drill};
+                var inDrill = false;
+                myChart.setOption(baseOption);
+
+                function renderBase() {{
+                    inDrill = false;
+                    myChart.setOption(baseOption, true);
+                }}
+
+                if (Object.keys(drillMap).length > 0) {{
+                    myChart.on('click', function(params) {{
+                        if (inDrill) return;
+                        var entry = drillMap[params.name];
+                        if (!entry || !entry.items || entry.items.length === 0) return;
+                        inDrill = true;
+                        var items = entry.items;
+                        var drillOption = {{
+                            title: {{
+                                text: entry.title || (params.name + ' — DOH por Producto (días)'),
+                                left: 4,
+                                top: 0,
+                                textStyle: {{ fontSize: 12, color: '#0f172a', fontWeight: 700 }}
+                            }},
+                            graphic: [{{
+                                type: 'group',
+                                right: 6,
+                                top: 0,
+                                cursor: 'pointer',
+                                onclick: renderBase,
+                                children: [
+                                    {{
+                                        type: 'rect',
+                                        shape: {{ width: 138, height: 22, r: 6 }},
+                                        style: {{ fill: '#f1f5f9', stroke: '#cbd5e1', lineWidth: 1 }}
+                                    }},
+                                    {{
+                                        type: 'text',
+                                        style: {{
+                                            text: '⬅ Volver a Sucursales',
+                                            x: 69,
+                                            y: 11,
+                                            textAlign: 'center',
+                                            textVerticalAlign: 'middle',
+                                            fill: '#0f172a',
+                                            font: '600 11px sans-serif'
+                                        }}
+                                    }}
+                                ]
+                            }}],
+                            tooltip: {{
+                                trigger: 'axis',
+                                axisPointer: {{ type: 'shadow' }},
+                                formatter: function(list) {{
+                                    var p = list[0];
+                                    var d = p.data;
+                                    return '<b>' + p.name + '</b><br/>DOH: <b>' + d.value + ' días</b><br/>Stock: ' + d.stock + ' kg | Consumo: ' + d.consumo + ' kg/d';
+                                }}
+                            }},
+                            grid: {{ left: '3%', right: '16%', bottom: '4%', top: '16%', containLabel: true }},
+                            xAxis: {{
+                                type: 'value',
+                                axisLabel: {{ formatter: '{{value}} d', fontSize: 10.5 }},
+                                splitLine: {{ lineStyle: {{ type: 'dashed', color: '#e2e8f0' }} }}
+                            }},
+                            yAxis: {{
+                                type: 'category',
+                                inverse: true,
+                                data: items.map(function(it) {{ return it.name; }}),
+                                axisLabel: {{ color: '#334155', fontSize: 10.5 }}
+                            }},
+                            series: [{{
+                                name: 'DOH (días)',
+                                type: 'bar',
+                                data: items.map(function(it) {{
+                                    return {{
+                                        value: it.value,
+                                        stock: it.stock,
+                                        consumo: it.consumo,
+                                        itemStyle: {{ color: it.color || entry.color || '#10b981', borderRadius: [0, 5, 5, 0] }}
+                                    }};
+                                }}),
+                                label: {{
+                                    show: true,
+                                    position: 'right',
+                                    formatter: '{{c}} d',
+                                    color: '#0f172a',
+                                    fontWeight: 'bold',
+                                    fontSize: 10.5
+                                }},
+                                markLine: {{
+                                    symbol: 'none',
+                                    lineStyle: {{ type: 'dashed', color: '#059669', width: 2 }},
+                                    label: {{ formatter: 'Meta: 12 d', position: 'insideEndTop', fontSize: 10 }},
+                                    data: [{{ xAxis: 12 }}]
+                                }}
+                            }}]
+                        }};
+                        myChart.setOption(drillOption, true);
+                    }});
+                }}
+
                 window.addEventListener('resize', function() {{
                     myChart.resize();
                 }});
@@ -1233,6 +1340,410 @@ def render_echarts(options: dict, height: int = 280, key: str = "chart"):
     </html>
     """
     st.iframe(html_code, width="stretch", height=height + 8)
+
+
+def _render_doh_interactivo(
+    option_base: dict,
+    drilldown_data: dict,
+    tabla_sucursales: list[dict],
+    product_map: Optional[dict] = None,
+    height: int = 345,
+) -> None:
+    """Renderiza el gráfico DOH y la tabla operativa derecha sincronizados en 3 niveles."""
+    json_options = json.dumps(option_base, ensure_ascii=False)
+    json_drill = json.dumps(drilldown_data, ensure_ascii=False)
+    json_suc = json.dumps(tabla_sucursales, ensure_ascii=False)
+    json_prod = json.dumps(product_map or {}, ensure_ascii=False)
+
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+        <style>
+            * {{ box-sizing: border-box; }}
+            html, body {{
+                margin: 0; padding: 0; width: 100%; background: transparent;
+                font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                color: #0f172a;
+            }}
+            .doh-grid {{
+                display: grid;
+                grid-template-columns: 1.15fr 1.35fr;
+                gap: 14px;
+                align-items: stretch;
+            }}
+            @media (max-width: 900px) {{
+                .doh-grid {{ grid-template-columns: 1fr; }}
+            }}
+            .doh-card {{
+                border: 1px solid rgba(49, 51, 63, 0.16);
+                border-radius: 10px;
+                padding: 14px 16px;
+                background: #ffffff;
+            }}
+            .doh-head {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 6px;
+            }}
+            .doh-title {{
+                font-size: 15px;
+                font-weight: 700;
+                color: #0f172a;
+                margin: 0;
+            }}
+            .doh-sub {{
+                font-size: 12px;
+                color: #64748b;
+                margin: 0 0 8px 0;
+            }}
+            .btn-back {{
+                display: none;
+                background: #f1f5f9;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11.5px;
+                font-weight: 600;
+                color: #0f172a;
+                cursor: pointer;
+            }}
+            .btn-back:hover {{ background: #e2e8f0; }}
+            #echart_doh_sync {{
+                width: 100%;
+                height: {height - 72}px;
+            }}
+            .tbl-wrap {{
+                width: 100%;
+                max-height: {height - 46}px;
+                overflow-y: auto;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12.5px;
+            }}
+            thead th {{
+                position: sticky;
+                top: 0;
+                background: #f8fafc;
+                color: #475569;
+                font-weight: 600;
+                text-align: left;
+                padding: 8px 10px;
+                border-bottom: 1px solid #e2e8f0;
+                white-space: nowrap;
+            }}
+            tbody td {{
+                padding: 7px 10px;
+                border-bottom: 1px solid #f1f5f9;
+                white-space: nowrap;
+            }}
+            tbody tr.clickable {{ cursor: pointer; }}
+            tbody tr.clickable:hover {{ background: #f8fafc; }}
+            .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+            .bold {{ font-weight: 600; }}
+        </style>
+    </head>
+    <body>
+        <div class="doh-grid">
+            <div class="doh-card">
+                <div class="doh-head">
+                    <div class="doh-title">📊 Cobertura DOH por Sucursal vs. Global (días)</div>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        <button id="btn_back_chart" class="btn-back" type="button">⬅ Volver</button>
+                        <button id="btn_home_chart" class="btn-back" type="button">🏠 Sucursales</button>
+                    </div>
+                </div>
+                <p class="doh-sub" id="chart_sub">💡 Pincha cualquier barra o fila para desplegar el DOH por producto (días).</p>
+                <div id="echart_doh_sync"></div>
+            </div>
+            <div class="doh-card">
+                <div class="doh-head">
+                    <div class="doh-title" id="tbl_title">📋 Detalle Operativo de Rotación y Platos/Día</div>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        <button id="btn_back_tbl" class="btn-back" type="button">⬅ Volver</button>
+                        <button id="btn_home_tbl" class="btn-back" type="button">🏠 Sucursales</button>
+                    </div>
+                </div>
+                <div class="tbl-wrap" id="tbl_container"></div>
+            </div>
+        </div>
+        <script>
+            (function() {{
+                var baseOption = {json_options};
+                var drillMap = {json_drill};
+                var sucRows = {json_suc};
+                var prodMap = {json_prod};
+                var myChart = echarts.init(document.getElementById('echart_doh_sync'), null, {{ renderer: 'canvas' }});
+                var tblContainer = document.getElementById('tbl_container');
+                var tblTitle = document.getElementById('tbl_title');
+                var chartSub = document.getElementById('chart_sub');
+                var btnBackChart = document.getElementById('btn_back_chart');
+                var btnHomeChart = document.getElementById('btn_home_chart');
+                var btnBackTbl = document.getElementById('btn_back_tbl');
+                var btnHomeTbl = document.getElementById('btn_home_tbl');
+                var level = 1;
+                var activeLocal = null;
+
+                function estadoBadge(d) {{
+                    if (d > 0 && d <= 15) return '🟢 Óptimo (≤ 15 d)';
+                    if (d > 15 && d <= 30) return '🟡 Preventivo (15-30 d)';
+                    if (d > 30) return '🔴 Sobre-stock (> 30 d)';
+                    return '⚪ Sin consumo';
+                }}
+
+                function setNavButtons(lvl) {{
+                    btnBackChart.style.display = (lvl >= 2) ? 'inline-block' : 'none';
+                    btnBackTbl.style.display = (lvl >= 2) ? 'inline-block' : 'none';
+                    btnHomeChart.style.display = (lvl === 3) ? 'inline-block' : 'none';
+                    btnHomeTbl.style.display = (lvl === 3) ? 'inline-block' : 'none';
+                    if (lvl === 2) {{
+                        btnBackChart.textContent = '⬅ Volver a Sucursales';
+                        btnBackTbl.textContent = '⬅ Ver Sucursales';
+                    }} else if (lvl === 3) {{
+                        btnBackChart.textContent = '⬅ ' + activeLocal;
+                        btnBackTbl.textContent = '⬅ ' + activeLocal;
+                    }}
+                }}
+
+                function renderTablaSucursales() {{
+                    tblTitle.textContent = '📋 Detalle Operativo de Rotación y Platos/Día';
+                    var html = '<table><thead><tr>'
+                        + '<th>Sucursal</th><th class="num">Stock (kg)</th><th class="num">Consumo/día</th>'
+                        + '<th class="num">Platos/día est.</th><th class="num">DOH (días)</th><th>Estado DOH</th>'
+                        + '</tr></thead><tbody>';
+                    sucRows.forEach(function(r) {{
+                        html += '<tr class="clickable" data-local="' + r.local.replace(/"/g, '&quot;') + '">'
+                            + '<td class="bold">' + r.local + '</td>'
+                            + '<td class="num">' + r.stock.toFixed(1) + ' kg</td>'
+                            + '<td class="num">' + r.consumo.toFixed(2) + ' kg/d</td>'
+                            + '<td class="num">' + Math.round(r.platos) + ' platos/d</td>'
+                            + '<td class="num bold">' + r.doh.toFixed(1) + ' d</td>'
+                            + '<td>' + r.estado + '</td>'
+                            + '</tr>';
+                    }});
+                    html += '</tbody></table>';
+                    tblContainer.innerHTML = html;
+                    tblContainer.querySelectorAll('tr.clickable').forEach(function(tr) {{
+                        tr.addEventListener('click', function() {{
+                            openLocal(tr.getAttribute('data-local'));
+                        }});
+                    }});
+                }}
+
+                function renderTablaProductos(localName, items) {{
+                    tblTitle.textContent = '📋 Detalle DOH por Producto — ' + localName;
+                    var html = '<table><thead><tr>'
+                        + '<th>Producto</th><th class="num">Stock (kg)</th><th class="num">Consumo/día</th>'
+                        + '<th class="num">DOH (días)</th><th>Estado DOH</th>'
+                        + '</tr></thead><tbody>';
+                    items.forEach(function(it) {{
+                        html += '<tr class="clickable" data-prod="' + it.name.replace(/"/g, '&quot;') + '">'
+                            + '<td class="bold">' + it.name + '</td>'
+                            + '<td class="num">' + Number(it.stock).toFixed(2) + ' kg</td>'
+                            + '<td class="num">' + Number(it.consumo).toFixed(2) + ' kg/d</td>'
+                            + '<td class="num bold">' + Number(it.value).toFixed(1) + ' d</td>'
+                            + '<td>' + estadoBadge(Number(it.value)) + '</td>'
+                            + '</tr>';
+                    }});
+                    html += '</tbody></table>';
+                    tblContainer.innerHTML = html;
+                    tblContainer.querySelectorAll('tr.clickable').forEach(function(tr) {{
+                        tr.addEventListener('click', function() {{
+                            openProduct(tr.getAttribute('data-prod'));
+                        }});
+                    }});
+                }}
+
+                function renderTablaProductoLocales(prodName, items) {{
+                    tblTitle.textContent = '🚚 Rebalanceo por Sucursal — ' + prodName;
+                    var html = '<table><thead><tr>'
+                        + '<th>Sucursal</th><th class="num">Stock (kg)</th><th class="num">Consumo/día</th>'
+                        + '<th class="num">DOH (días)</th><th class="num">Balance vs. 12 d</th>'
+                        + '</tr></thead><tbody>';
+                    items.forEach(function(it) {{
+                        var bal = Number(it.balance);
+                        var balTxt = (bal >= 0 ? '+' : '') + bal.toFixed(1) + ' kg';
+                        var balColor = (it.name.indexOf('Global') !== -1)
+                            ? '#0f172a'
+                            : (bal >= 0 ? '#059669' : '#d97706');
+                        html += '<tr>'
+                            + '<td class="bold">' + it.name + '</td>'
+                            + '<td class="num">' + Number(it.stock).toFixed(2) + ' kg</td>'
+                            + '<td class="num">' + Number(it.consumo).toFixed(2) + ' kg/d</td>'
+                            + '<td class="num bold">' + Number(it.value).toFixed(1) + ' d</td>'
+                            + '<td class="num bold" style="color:' + balColor + ';">' + balTxt + '</td>'
+                            + '</tr>';
+                    }});
+                    html += '</tbody></table>';
+                    tblContainer.innerHTML = html;
+                }}
+
+                function renderBase() {{
+                    level = 1;
+                    activeLocal = null;
+                    setNavButtons(1);
+                    chartSub.textContent = '💡 Pincha cualquier barra o fila para desplegar el DOH por producto (días).';
+                    myChart.setOption(baseOption, true);
+                    renderTablaSucursales();
+                }}
+
+                function openLocal(localName) {{
+                    var entry = drillMap[localName];
+                    if (!entry || !entry.items || entry.items.length === 0) return;
+                    level = 2;
+                    activeLocal = localName;
+                    setNavButtons(2);
+                    chartSub.textContent = (entry.title || localName) + ' · Pincha un producto para comparar locales.';
+                    var items = entry.items;
+                    var drillOption = {{
+                        tooltip: {{
+                            trigger: 'axis',
+                            axisPointer: {{ type: 'shadow' }},
+                            formatter: function(list) {{
+                                var p = list[0];
+                                var d = p.data;
+                                return '<b>' + p.name + '</b><br/>DOH: <b>' + d.value + ' días</b><br/>Stock: ' + d.stock + ' kg | Consumo: ' + d.consumo + ' kg/d';
+                            }}
+                        }},
+                        grid: {{ left: '3%', right: '15%', bottom: '4%', top: '6%', containLabel: true }},
+                        xAxis: {{
+                            type: 'value',
+                            axisLabel: {{ formatter: '{{value}} d', fontSize: 10.5 }},
+                            splitLine: {{ lineStyle: {{ type: 'dashed', color: '#e2e8f0' }} }}
+                        }},
+                        yAxis: {{
+                            type: 'category',
+                            inverse: true,
+                            data: items.map(function(it) {{ return it.name; }}),
+                            axisLabel: {{ color: '#334155', fontSize: 10.5 }}
+                        }},
+                        series: [{{
+                            name: 'DOH (días)',
+                            type: 'bar',
+                            data: items.map(function(it) {{
+                                return {{
+                                    value: it.value,
+                                    stock: it.stock,
+                                    consumo: it.consumo,
+                                    itemStyle: {{ color: it.color || '#10b981', borderRadius: [0, 5, 5, 0] }}
+                                }};
+                            }}),
+                            label: {{
+                                show: true,
+                                position: 'right',
+                                formatter: '{{c}} d',
+                                color: '#0f172a',
+                                fontWeight: 'bold',
+                                fontSize: 10.5
+                            }},
+                            markLine: {{
+                                symbol: 'none',
+                                lineStyle: {{ type: 'dashed', color: '#059669', width: 2 }},
+                                label: {{ formatter: 'Meta: 12 d', position: 'insideEndTop', fontSize: 10 }},
+                                data: [{{ xAxis: 12 }}]
+                            }}
+                        }}]
+                    }};
+                    myChart.setOption(drillOption, true);
+                    renderTablaProductos(localName, items);
+                }}
+
+                function openProduct(prodName) {{
+                    var items = prodMap[prodName];
+                    if (!items || items.length === 0) return;
+                    level = 3;
+                    setNavButtons(3);
+                    chartSub.textContent = '🥩 ' + prodName + ' — Comparativo DOH entre bodegas (Meta: 12 d)';
+                    var prodOption = {{
+                        tooltip: {{
+                            trigger: 'axis',
+                            axisPointer: {{ type: 'shadow' }},
+                            formatter: function(list) {{
+                                var p = list[0];
+                                var d = p.data;
+                                var b = Number(d.balance);
+                                var bTxt = (b >= 0 ? '+' : '') + b.toFixed(1) + ' kg';
+                                return '<b>' + p.name + '</b><br/>DOH: <b>' + d.value + ' días</b><br/>Stock: ' + d.stock + ' kg | Balance 12d: <b>' + bTxt + '</b>';
+                            }}
+                        }},
+                        grid: {{ left: '3%', right: '15%', bottom: '4%', top: '6%', containLabel: true }},
+                        xAxis: {{
+                            type: 'value',
+                            axisLabel: {{ formatter: '{{value}} d', fontSize: 10.5 }},
+                            splitLine: {{ lineStyle: {{ type: 'dashed', color: '#e2e8f0' }} }}
+                        }},
+                        yAxis: {{
+                            type: 'category',
+                            inverse: true,
+                            data: items.map(function(it) {{ return it.name; }}),
+                            axisLabel: {{ color: '#334155', fontSize: 11 }}
+                        }},
+                        series: [{{
+                            name: 'DOH (días)',
+                            type: 'bar',
+                            data: items.map(function(it) {{
+                                return {{
+                                    value: it.value,
+                                    stock: it.stock,
+                                    consumo: it.consumo,
+                                    balance: it.balance,
+                                    itemStyle: {{ color: it.color || '#10b981', borderRadius: [0, 6, 6, 0] }}
+                                }};
+                            }}),
+                            label: {{
+                                show: true,
+                                position: 'right',
+                                formatter: '{{c}} d',
+                                color: '#0f172a',
+                                fontWeight: 'bold',
+                                fontSize: 11
+                            }},
+                            markLine: {{
+                                symbol: 'none',
+                                lineStyle: {{ type: 'dashed', color: '#059669', width: 2 }},
+                                label: {{ formatter: 'Meta Lean: 12 d', position: 'insideEndTop', fontSize: 10 }},
+                                data: [{{ xAxis: 12 }}]
+                            }}
+                        }}]
+                    }};
+                    myChart.setOption(prodOption, true);
+                    renderTablaProductoLocales(prodName, items);
+                }}
+
+                myChart.on('click', function(params) {{
+                    if (level === 1) {{
+                        openLocal(params.name);
+                    }} else if (level === 2) {{
+                        openProduct(params.name);
+                    }}
+                }});
+                btnBackChart.addEventListener('click', function() {{
+                    if (level === 3 && activeLocal) openLocal(activeLocal);
+                    else renderBase();
+                }});
+                btnBackTbl.addEventListener('click', function() {{
+                    if (level === 3 && activeLocal) openLocal(activeLocal);
+                    else renderBase();
+                }});
+                btnHomeChart.addEventListener('click', renderBase);
+                btnHomeTbl.addEventListener('click', renderBase);
+                renderBase();
+                window.addEventListener('resize', function() {{ myChart.resize(); }});
+            }})();
+        </script>
+    </body>
+    </html>
+    """
+    st.iframe(html_code, width="stretch", height=height + 24)
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL Y ESTILOS
@@ -2439,24 +2950,41 @@ def _render_detalle_lotes_fragment(inventario_df: pd.DataFrame, nombre_local_ctx
     prev_count = int((inventario_df["severidad_alerta"] == 3).sum()) if not inventario_df.empty else 0
     opt_count = int((inventario_df["severidad_alerta"] == 4).sum()) if not inventario_df.empty else 0
 
-    col_filtro1, col_filtro2 = st.columns([1.1, 1.9])
-    with col_filtro1:
-        OPC_FILTRO_ALERTA = {
-            "Todos los niveles": f"🌐 Todos ({tot_count})",
-            "🔴 Vencido": f"🔴 Vencido ({venc_count})",
-            "🟠 Crítico (≤ 7 días)": f"🟠 Crítico ({crit_count})",
-            "🟡 Preventivo (8-30 días)": f"🟡 Preventivo ({prev_count})",
-            "🟢 Óptimo (> 30 días)": f"🟢 Óptimo ({opt_count})",
-        }
-        filtro_alerta = _select_pills(
-            "Filtrar por nivel de riesgo:",
-            OPC_FILTRO_ALERTA,
-            key="pill_filtro_alerta_frag",
-            default_key="Todos los niveles",
+    OPC_FILTRO_ALERTA = {
+        "Todos los niveles": f"🌐 Todos ({tot_count})",
+        "🔴 Vencido": f"🔴 Vencido ({venc_count})",
+        "🟠 Crítico (≤ 7 días)": f"🟠 Crítico ({crit_count})",
+        "🟡 Preventivo (8-30 días)": f"🟡 Preventivo ({prev_count})",
+        "🟢 Óptimo (> 30 días)": f"🟢 Óptimo ({opt_count})",
+    }
+    filtro_alerta = _select_pills(
+        "Filtrar por nivel de riesgo:",
+        OPC_FILTRO_ALERTA,
+        key="pill_filtro_alerta_frag",
+        default_key="Todos los niveles",
+    )
+
+    locales_lotes_disp = ["Todos"] + sorted(inventario_df["local"].dropna().unique().tolist())
+    productos_lotes_disp = ["Todos"] + sorted(inventario_df["producto"].dropna().unique().tolist())
+
+    col_f_loc, col_f_prod, col_f_busq = st.columns([1.0, 1.1, 1.4], vertical_alignment="bottom")
+    with col_f_loc:
+        filtro_local_lotes = st.selectbox(
+            "📍 Local físico:",
+            options=locales_lotes_disp,
+            index=0,
+            key="sel_filtro_local_lotes_frag",
         )
-    with col_filtro2:
+    with col_f_prod:
+        filtro_prod_lotes = st.selectbox(
+            "🥩 Tipo de producto:",
+            options=productos_lotes_disp,
+            index=0,
+            key="sel_filtro_prod_lotes_frag",
+        )
+    with col_f_busq:
         filtro_busqueda = st.text_input(
-            "Buscar por producto, proveedor o código de lote:",
+            "🔎 Buscar por producto, proveedor o código de lote:",
             placeholder="Ej. Atún, Vacuno Demo, L-2026...",
             key="input_busqueda_lotes_frag",
         )
@@ -2465,12 +2993,18 @@ def _render_detalle_lotes_fragment(inventario_df: pd.DataFrame, nombre_local_ctx
     if filtro_alerta != "Todos los niveles":
         datos_filtrados = datos_filtrados[datos_filtrados["estado_alerta"] == filtro_alerta]
 
+    if filtro_local_lotes != "Todos":
+        datos_filtrados = datos_filtrados[datos_filtrados["local"] == filtro_local_lotes]
+
+    if filtro_prod_lotes != "Todos":
+        datos_filtrados = datos_filtrados[datos_filtrados["producto"] == filtro_prod_lotes]
+
     if filtro_busqueda.strip():
         patron = filtro_busqueda.strip().lower()
         datos_filtrados = datos_filtrados[
-            datos_filtrados["producto"].str.lower().str.contains(patron)
-            | datos_filtrados["codigo_lote_proveedor"].str.lower().str.contains(patron)
-            | datos_filtrados["proveedor"].str.lower().str.contains(patron)
+            datos_filtrados["producto"].str.lower().str.contains(patron, na=False)
+            | datos_filtrados["codigo_lote_proveedor"].str.lower().str.contains(patron, na=False)
+            | datos_filtrados["proveedor"].str.lower().str.contains(patron, na=False)
         ]
 
     # Barra informativa contextual y botón de exportar
@@ -3098,128 +3632,191 @@ if nav_tab == "alertas":
                 )
 
                 resumen_doh_global = db.calcular_doh_resumen(df_doh_locales, id_local=None)
-                col_doh1, col_doh2 = st.columns([1.2, 1.3])
 
-                with col_doh1:
-                    with st.container(border=True):
-                        st.markdown("##### 📊 Cobertura DOH por Sucursal vs. Global (días)")
-                        etiquetas_doh = ["🌐 Global Cadena"] + df_doh_locales["local"].tolist()
-                        valores_doh = [round(resumen_doh_global["doh_dias"], 1)] + [
-                            round(float(v), 1) for v in df_doh_locales["doh_dias"].tolist()
-                        ]
+                etiquetas_doh = ["🌐 Global Cadena"] + df_doh_locales["local"].tolist()
+                valores_doh = [round(resumen_doh_global["doh_dias"], 1)] + [
+                    round(float(v), 1) for v in df_doh_locales["doh_dias"].tolist()
+                ]
 
-                        def _color_barra_doh(val: float) -> str:
-                            if val <= 15:
-                                return "#10b981"
-                            if val <= 30:
-                                return "#f59e0b"
-                            return "#ef4444"
+                def _color_barra_doh(val: float) -> str:
+                    if val <= 15:
+                        return "#10b981"
+                    if val <= 30:
+                        return "#f59e0b"
+                    return "#ef4444"
 
-                        datos_barra_doh = [
-                            {
-                                "value": v,
-                                "itemStyle": {
-                                    "color": "#0d2b45" if idx == 0 else _color_barra_doh(v),
-                                    "borderRadius": [0, 6, 6, 0],
-                                },
-                            }
-                            for idx, v in enumerate(valores_doh)
-                        ]
+                datos_barra_doh = [
+                    {
+                        "value": v,
+                        "itemStyle": {
+                            "color": "#0d2b45" if idx == 0 else _color_barra_doh(v),
+                            "borderRadius": [0, 6, 6, 0],
+                        },
+                    }
+                    for idx, v in enumerate(valores_doh)
+                ]
 
-                        option_doh = {
-                            "tooltip": {
-                                "trigger": "axis",
-                                "axisPointer": {"type": "shadow"},
-                                "formatter": "{b}: <b>{c} días</b>",
+                option_doh = {
+                    "tooltip": {
+                        "trigger": "axis",
+                        "axisPointer": {"type": "shadow"},
+                        "formatter": "{b}: <b>{c} días</b>",
+                    },
+                    "grid": {
+                        "left": "3%",
+                        "right": "14%",
+                        "bottom": "4%",
+                        "top": "8%",
+                        "containLabel": True,
+                    },
+                    "xAxis": {
+                        "type": "value",
+                        "axisLabel": {"formatter": "{value} d"},
+                        "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
+                    },
+                    "yAxis": {
+                        "type": "category",
+                        "inverse": True,
+                        "data": etiquetas_doh,
+                        "axisLabel": {"color": "#334155", "fontSize": 11},
+                    },
+                    "series": [
+                        {
+                            "name": "DOH (días)",
+                            "type": "bar",
+                            "data": datos_barra_doh,
+                            "label": {
+                                "show": True,
+                                "position": "right",
+                                "formatter": "{c} d",
+                                "color": "#0f172a",
+                                "fontWeight": "bold",
+                                "fontSize": 11,
                             },
-                            "grid": {
-                                "left": "3%",
-                                "right": "14%",
-                                "bottom": "4%",
-                                "top": "8%",
-                                "containLabel": True,
+                            "markLine": {
+                                "symbol": "none",
+                                "lineStyle": {"type": "dashed", "color": "#059669", "width": 2},
+                                "label": {"formatter": "Meta Lean: 12 d", "position": "insideEndTop"},
+                                "data": [{"xAxis": 12}],
                             },
-                            "xAxis": {
-                                "type": "value",
-                                "axisLabel": {"formatter": "{value} d"},
-                                "splitLine": {"lineStyle": {"type": "dashed", "color": "#e2e8f0"}},
-                            },
-                            "yAxis": {
-                                "type": "category",
-                                "inverse": True,
-                                "data": etiquetas_doh,
-                                "axisLabel": {"color": "#334155", "fontSize": 11},
-                            },
-                            "series": [
-                                {
-                                    "name": "DOH (días)",
-                                    "type": "bar",
-                                    "data": datos_barra_doh,
-                                    "label": {
-                                        "show": True,
-                                        "position": "right",
-                                        "formatter": "{c} d",
-                                        "color": "#0f172a",
-                                        "fontWeight": "bold",
-                                        "fontSize": 11,
-                                    },
-                                    "markLine": {
-                                        "symbol": "none",
-                                        "lineStyle": {"type": "dashed", "color": "#059669", "width": 2},
-                                        "label": {"formatter": "Meta Lean: 12 d", "position": "insideEndTop"},
-                                        "data": [{"xAxis": 12}],
-                                    },
-                                }
-                            ],
                         }
-                        render_echarts(option_doh, height=270, key="bar_doh_sucursales")
+                    ],
+                }
 
-                with col_doh2:
-                    with st.container(border=True):
-                        st.markdown("##### 📋 Detalle Operativo de Rotación y Platos/Día")
-                        df_doh_view = df_doh_locales[
-                            ["local", "kg_stock", "consumo_diario_kg", "platos_dia_est", "doh_dias", "estado_doh"]
-                        ].copy()
-                        fila_global = pd.DataFrame(
-                            [
-                                {
-                                    "local": "🌐 Global Cadena",
-                                    "kg_stock": resumen_doh_global["kg_stock"],
-                                    "consumo_diario_kg": resumen_doh_global["consumo_diario_kg"],
-                                    "platos_dia_est": resumen_doh_global["platos_dia_est"],
-                                    "doh_dias": resumen_doh_global["doh_dias"],
-                                    "estado_doh": (
-                                        "🟢 Óptimo (≤ 15 d)"
-                                        if 0 < resumen_doh_global["doh_dias"] <= 15
-                                        else (
-                                            "🟡 Preventivo (15-30 d)"
-                                            if 15 < resumen_doh_global["doh_dias"] <= 30
-                                            else "🔴 Sobre-stock (> 30 d)"
-                                        )
-                                    ),
-                                }
-                            ]
+                df_doh_prod = _c_doh_productos_locales()
+                drilldown_doh: dict = {}
+                if not df_doh_prod.empty:
+                    grp_global_doh = (
+                        df_doh_prod.groupby("producto", as_index=False)
+                        .agg(kg_stock=("kg_stock", "sum"), consumo_diario_kg=("consumo_diario_kg", "sum"))
+                    )
+                    grp_global_doh["doh_dias"] = grp_global_doh.apply(
+                        lambda r: (r["kg_stock"] / r["consumo_diario_kg"]) if r["consumo_diario_kg"] > 0 else 0.0,
+                        axis=1,
+                    )
+                    grp_global_doh = grp_global_doh.sort_values("doh_dias", ascending=False)
+                    drilldown_doh["🌐 Global Cadena"] = {
+                        "title": "🌐 Global Cadena — DOH por Producto (días)",
+                        "items": [
+                            {
+                                "name": str(r["producto"]),
+                                "value": round(float(r["doh_dias"]), 1),
+                                "stock": round(float(r["kg_stock"]), 2),
+                                "consumo": round(float(r["consumo_diario_kg"]), 2),
+                                "color": _color_barra_doh(float(r["doh_dias"])),
+                            }
+                            for _, r in grp_global_doh.iterrows()
+                        ],
+                    }
+                    for loc_nom in df_doh_locales["local"].tolist():
+                        sub_loc_doh = df_doh_prod[df_doh_prod["local"] == loc_nom].sort_values(
+                            "doh_dias", ascending=False
                         )
-                        df_doh_tabla = pd.concat([fila_global, df_doh_view], ignore_index=True)
-                        df_doh_tabla.columns = [
-                            "Sucursal",
-                            "Stock (kg)",
-                            "Consumo/día (kg)",
-                            "Platos/día est.",
-                            "DOH (días)",
-                            "Estado DOH",
+                        if not sub_loc_doh.empty:
+                            drilldown_doh[loc_nom] = {
+                                "title": f"📍 {loc_nom} — DOH por Producto (días)",
+                                "items": [
+                                    {
+                                        "name": str(r["producto"]),
+                                        "value": round(float(r["doh_dias"]), 1),
+                                        "stock": round(float(r["kg_stock"]), 2),
+                                        "consumo": round(float(r["consumo_diario_kg"]), 2),
+                                        "color": _color_barra_doh(float(r["doh_dias"])),
+                                    }
+                                    for _, r in sub_loc_doh.iterrows()
+                                ],
+                            }
+
+                estado_global_doh = (
+                    "🟢 Óptimo (≤ 15 d)"
+                    if 0 < resumen_doh_global["doh_dias"] <= 15
+                    else (
+                        "🟡 Preventivo (15-30 d)"
+                        if 15 < resumen_doh_global["doh_dias"] <= 30
+                        else "🔴 Sobre-stock (> 30 d)"
+                    )
+                )
+                tabla_sucursales_sync = [
+                    {
+                        "local": "🌐 Global Cadena",
+                        "stock": round(float(resumen_doh_global["kg_stock"]), 1),
+                        "consumo": round(float(resumen_doh_global["consumo_diario_kg"]), 2),
+                        "platos": round(float(resumen_doh_global["platos_dia_est"]), 0),
+                        "doh": round(float(resumen_doh_global["doh_dias"]), 1),
+                        "estado": estado_global_doh,
+                    }
+                ] + [
+                    {
+                        "local": str(r["local"]),
+                        "stock": round(float(r["kg_stock"]), 1),
+                        "consumo": round(float(r["consumo_diario_kg"]), 2),
+                        "platos": round(float(r["platos_dia_est"]), 0),
+                        "doh": round(float(r["doh_dias"]), 1),
+                        "estado": str(r["estado_doh"]),
+                    }
+                    for _, r in df_doh_locales.iterrows()
+                ]
+
+                product_map: dict = {}
+                if not df_doh_prod.empty:
+                    for prod_nom, grp_p in df_doh_prod.groupby("producto"):
+                        kg_tot_p = float(grp_p["kg_stock"].sum())
+                        cons_tot_p = float(grp_p["consumo_diario_kg"].sum())
+                        doh_glob_p = (kg_tot_p / cons_tot_p) if cons_tot_p > 0 else 0.0
+                        bal_glob_p = kg_tot_p - (12.0 * cons_tot_p)
+                        filas_p = [
+                            {
+                                "name": "🌐 Global Producto",
+                                "value": round(doh_glob_p, 1),
+                                "stock": round(kg_tot_p, 2),
+                                "consumo": round(cons_tot_p, 2),
+                                "balance": round(bal_glob_p, 1),
+                                "color": "#0d2b45",
+                            }
                         ]
-                        st.dataframe(
-                            df_doh_tabla,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Stock (kg)": st.column_config.NumberColumn(format="%.1f kg"),
-                                "Consumo/día (kg)": st.column_config.NumberColumn(format="%.2f kg/d"),
-                                "Platos/día est.": st.column_config.NumberColumn(format="%.0f platos/d"),
-                                "DOH (días)": st.column_config.NumberColumn(format="%.1f d"),
-                            },
-                        )
+                        for _, rp in grp_p.sort_values("doh_dias", ascending=False).iterrows():
+                            doh_l_p = float(rp["doh_dias"])
+                            kg_l_p = float(rp["kg_stock"])
+                            cons_l_p = float(rp["consumo_diario_kg"])
+                            filas_p.append(
+                                {
+                                    "name": str(rp["local"]),
+                                    "value": round(doh_l_p, 1),
+                                    "stock": round(kg_l_p, 2),
+                                    "consumo": round(cons_l_p, 2),
+                                    "balance": round(kg_l_p - (12.0 * cons_l_p), 1),
+                                    "color": _color_barra_doh(doh_l_p),
+                                }
+                            )
+                        product_map[str(prod_nom)] = filas_p
+
+                _render_doh_interactivo(
+                    option_base=option_doh,
+                    drilldown_data=drilldown_doh,
+                    tabla_sucursales=tabla_sucursales_sync,
+                    product_map=product_map,
+                    height=355,
+                )
 
     # --------------------------------------------------------------------------
     # SUB-TAB B: OPORTUNIDADES & RESCATE EN CARTA (PLAN DE CHOQUE)
@@ -4770,16 +5367,49 @@ elif nav_tab == "mermas":
         if hist_mermas.empty:
             st.info("No se registran actas de merma para el filtro seleccionado.")
         else:
-            st.dataframe(
-                hist_mermas[[
-                    "id_movimiento", "fecha_movimiento", "local", "producto",
-                    "codigo_lote_proveedor", "motivo_merma", "cantidad", "unidad_medida",
-                    "costo_unitario", "costo_total_merma", "observaciones"
-                ]],
+            @st.dialog("📄 Vista Previa — Acta de Baja por Merma", width="large")
+            def _mostrar_preview_acta_merma(id_mov: int) -> None:
+                import base64
+
+                st.markdown(f"#### 📄 Acta Oficial de Merma **N° {id_mov}**")
+                try:
+                    data_pdf = _c_movimiento_pdf(int(id_mov))
+                    pdf_bytes = reportes_pdf.generar_pdf_acta_merma(data_pdf)
+                    st.download_button(
+                        label=f"⬇️ Descargar Acta_Merma_{id_mov}.pdf",
+                        data=pdf_bytes,
+                        file_name=f"Acta_Merma_{id_mov}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        width="stretch",
+                        key=f"dl_modal_acta_merma_{id_mov}",
+                        on_click="ignore",
+                    )
+                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+                    st.markdown(
+                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
+                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
+                        unsafe_allow_html=True,
+                    )
+                except Exception as ex_pdf_prev:
+                    st.error(f"No se pudo generar la vista previa del Acta #{id_mov}: {ex_pdf_prev}")
+
+            st.caption("📄 Haz clic en el cuadro de selección de cualquier fila para abrir la vista previa oficial del Acta de Merma en PDF.")
+            df_mermas_view = hist_mermas[[
+                "id_movimiento", "fecha_movimiento", "local", "producto",
+                "codigo_lote_proveedor", "motivo_merma", "cantidad", "unidad_medida",
+                "costo_unitario", "costo_total_merma", "observaciones"
+            ]].reset_index(drop=True)
+
+            evt_merma = st.dataframe(
+                df_mermas_view,
                 width="stretch",
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="df_libro_actas_merma",
                 column_config={
-                    "id_movimiento": "N° Acta",
+                    "id_movimiento": "📄 N° Acta",
                     "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="YYYY-MM-DD HH:mm"),
                     "local": "Sucursal",
                     "producto": "Materia Prima",
@@ -4792,6 +5422,13 @@ elif nav_tab == "mermas":
                     "observaciones": "Causa Raíz / Detalle",
                 },
             )
+
+            sel_rows_merma = list(evt_merma.selection.rows) if evt_merma and evt_merma.selection else []
+            if sel_rows_merma != st.session_state.get("_merma_sel_prev", []):
+                st.session_state["_merma_sel_prev"] = sel_rows_merma
+                if sel_rows_merma:
+                    id_acta_sel = int(df_mermas_view.iloc[sel_rows_merma[0]]["id_movimiento"])
+                    _mostrar_preview_acta_merma(id_acta_sel)
 
 # ==============================================================================
 # TAB 6: TRAZABILIDAD POR LOTE CON LÍNEA DE TIEMPO VISUAL
@@ -4826,13 +5463,97 @@ elif nav_tab == "trazabilidad":
         @st.fragment
         def _render_trazabilidad_expediente_fragment() -> None:
             lotes_disponibles = _c_lotes_selector()
+            if not lotes_disponibles.empty and (
+                "fecha_recepcion" not in lotes_disponibles.columns
+                or "local_receptor" not in lotes_disponibles.columns
+            ):
+                _c_lotes_selector.clear()
+                lotes_disponibles = _c_lotes_selector()
             if lotes_disponibles.empty:
                 st.info("No existen lotes registrados en la base de datos.")
                 return
 
+            df_lotes_base = lotes_disponibles.copy()
+            df_lotes_base["_fecha_rec_dt"] = pd.to_datetime(df_lotes_base["fecha_recepcion"]).dt.date
+            f_rec_min = df_lotes_base["_fecha_rec_dt"].min()
+            f_rec_max = df_lotes_base["_fecha_rec_dt"].max()
+            locales_unicos = ["Todos"] + sorted(df_lotes_base["local_receptor"].dropna().unique().tolist())
+            productos_unicos = ["Todos"] + sorted(df_lotes_base["producto"].dropna().unique().tolist())
+
+            idx_local_def = 0
+            if id_local_activo is not None and nombre_local_ctx in locales_unicos:
+                idx_local_def = locales_unicos.index(nombre_local_ctx)
+
+            with st.container(border=True):
+                col_f_txt, col_f_loc, col_f_prod, col_f_fec = st.columns(
+                    [1.3, 1.0, 1.0, 1.1], vertical_alignment="bottom"
+                )
+                with col_f_txt:
+                    txt_busqueda_lote = st.text_input(
+                        "🔎 Buscar por N° lote, código o proveedor:",
+                        placeholder="Ej: 498, LT-5-1109, Trutro, Cerdo...",
+                        key="traz_filtro_texto",
+                    ).strip().lower()
+                with col_f_loc:
+                    local_sel_traz = st.selectbox(
+                        "📍 Local origen:",
+                        options=locales_unicos,
+                        index=idx_local_def,
+                        key="traz_filtro_local",
+                    )
+                with col_f_prod:
+                    prod_sel_traz = st.selectbox(
+                        "🥩 Tipo de carne / Producto:",
+                        options=productos_unicos,
+                        index=0,
+                        key="traz_filtro_producto",
+                    )
+                with col_f_fec:
+                    rango_rec_traz = st.date_input(
+                        "📅 Rango fecha recepción:",
+                        value=(f_rec_min, f_rec_max),
+                        min_value=f_rec_min,
+                        max_value=f_rec_max,
+                        key="traz_filtro_fecha_rec",
+                    )
+
+            df_lotes_filt = df_lotes_base
+            if local_sel_traz != "Todos":
+                df_lotes_filt = df_lotes_filt[df_lotes_filt["local_receptor"] == local_sel_traz]
+            if prod_sel_traz != "Todos":
+                df_lotes_filt = df_lotes_filt[df_lotes_filt["producto"] == prod_sel_traz]
+
+            if isinstance(rango_rec_traz, (tuple, list)) and len(rango_rec_traz) == 2:
+                f_ini_rec, f_fin_rec = rango_rec_traz[0], rango_rec_traz[1]
+            elif isinstance(rango_rec_traz, (tuple, list)) and len(rango_rec_traz) == 1:
+                f_ini_rec = f_fin_rec = rango_rec_traz[0]
+            else:
+                f_ini_rec = f_fin_rec = rango_rec_traz
+            if f_ini_rec > f_fin_rec:
+                f_ini_rec, f_fin_rec = f_fin_rec, f_ini_rec
+
+            df_lotes_filt = df_lotes_filt[
+                (df_lotes_filt["_fecha_rec_dt"] >= f_ini_rec)
+                & (df_lotes_filt["_fecha_rec_dt"] <= f_fin_rec)
+            ]
+
+            if txt_busqueda_lote:
+                mask_txt = (
+                    df_lotes_filt["id_lote"].astype(str).str.contains(txt_busqueda_lote, case=False, na=False)
+                    | df_lotes_filt["codigo_lote_proveedor"].astype(str).str.lower().str.contains(txt_busqueda_lote, na=False)
+                    | df_lotes_filt["producto"].astype(str).str.lower().str.contains(txt_busqueda_lote, na=False)
+                    | df_lotes_filt["proveedor"].astype(str).str.lower().str.contains(txt_busqueda_lote, na=False)
+                )
+                df_lotes_filt = df_lotes_filt[mask_txt]
+
+            st.caption(f"Mostrando **{len(df_lotes_filt)}** de **{len(df_lotes_base)}** lotes registrados.")
+            if df_lotes_filt.empty:
+                st.warning("No se encontraron lotes que coincidan con los filtros aplicados.")
+                return
+
             opciones_lotes = {
                 int(row["id_lote"]): row["display_label"]
-                for _, row in lotes_disponibles.iterrows()
+                for _, row in df_lotes_filt.iterrows()
             }
 
             col_sel_lote, col_hud_lote = st.columns([1.7, 1.3], vertical_alignment="bottom")
@@ -4841,6 +5562,7 @@ elif nav_tab == "trazabilidad":
                     "Lote a auditar:",
                     options=list(opciones_lotes.keys()),
                     format_func=lambda k: opciones_lotes[k],
+                    key="traz_lote_sel_filtrado",
                 )
 
             if lote_id_sel:
@@ -5048,21 +5770,29 @@ elif nav_tab == "reportes":
                 key="rep_sel_tipo_pills",
                 default_key="merma",
             )
-            col_rf2, col_rf3, col_rf4 = st.columns([2.0, 0.9, 0.9])
+
+            col_rf1, col_rf2, col_rf3, col_rf4 = st.columns([1.5, 1.2, 0.75, 0.75], vertical_alignment="bottom")
+            with col_rf1:
+                filtro_txt = st.text_input(
+                    "🔎 Búsqueda rápida:",
+                    placeholder="Folio, manipulador, proveedor, producto, FAC-...",
+                    key="rep_filtro_texto",
+                ).strip() if rep_tipo != "lote" else ""
             with col_rf2:
                 if local_activo_id:
                     rep_local_id = local_activo_id
                     rep_local_label = local_activo_nombre
                     st.text_input("Sucursal:", value=local_activo_nombre, disabled=True, key="rep_loc_locked")
                 else:
-                    opc_rep_locales = {0: "🌐 Todas"}
+                    opc_rep_locales = {0: "🌐 Todas las Sucursales"}
                     for _, r_loc in locales_df.iterrows():
                         opc_rep_locales[int(r_loc["id_local"])] = r_loc["nombre"]
-                    sel_rep_loc = _select_pills(
+                    sel_rep_loc = st.selectbox(
                         "Sucursal:",
-                        opc_rep_locales,
-                        key="rep_sel_local_pills",
-                        default_key=0,
+                        options=list(opc_rep_locales.keys()),
+                        format_func=lambda k: opc_rep_locales[k],
+                        index=0,
+                        key="rep_sel_local_box",
                     )
                     rep_local_id = None if sel_rep_loc == 0 else sel_rep_loc
                     rep_local_label = opc_rep_locales[sel_rep_loc]
@@ -5138,7 +5868,7 @@ elif nav_tab == "reportes":
                 "detail_fn": _c_movimiento_pdf,
                 "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "responsable", "rol_responsable", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total", "observaciones"],
                 "col_cfg": {
-                    "id_movimiento": "N° Acta",
+                    "id_movimiento": "📄 N° Acta",
                     "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
                     "local_origen": "Sucursal",
                     "responsable": "Responsable Baja",
@@ -5160,7 +5890,7 @@ elif nav_tab == "reportes":
                 "detail_fn": _c_movimiento_pdf,
                 "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "responsable", "rol_responsable", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total", "observaciones"],
                 "col_cfg": {
-                    "id_movimiento": "Folio",
+                    "id_movimiento": "📄 Folio",
                     "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
                     "local_origen": "Sucursal",
                     "responsable": "Manipulador / Chef",
@@ -5182,7 +5912,7 @@ elif nav_tab == "reportes":
                 "detail_fn": _c_movimiento_pdf,
                 "cols": ["id_movimiento", "fecha_movimiento", "local_origen", "local_destino", "responsable", "receptor", "referencia", "productos_resumen", "total_lotes", "total_cantidad", "costo_total"],
                 "col_cfg": {
-                    "id_movimiento": "N° Guía",
+                    "id_movimiento": "📄 N° Guía",
                     "fecha_movimiento": st.column_config.DatetimeColumn("Fecha y Hora", format="DD/MM/YYYY HH:mm"),
                     "local_origen": "Origen",
                     "local_destino": "Destino",
@@ -5204,7 +5934,7 @@ elif nav_tab == "reportes":
                 "detail_fn": _c_recepcion_pdf,
                 "cols": ["id_compra", "fecha_recepcion", "tipo_documento", "numero_documento", "proveedor", "rut_proveedor", "local_receptor", "recibido_por", "productos_resumen", "total_lotes", "total_cantidad", "temp_max", "monto_total"],
                 "col_cfg": {
-                    "id_compra": "Folio",
+                    "id_compra": "📄 Folio",
                     "fecha_recepcion": st.column_config.DateColumn("Fecha Rec.", format="DD/MM/YYYY"),
                     "tipo_documento": "Tipo Doc.",
                     "numero_documento": "N° Doc.",
@@ -5249,12 +5979,6 @@ elif nav_tab == "reportes":
                 fecha_hasta=rep_hasta,
             )
 
-        filtro_txt = st.text_input(
-            "🔎 Búsqueda rápida (folio, manipulador, proveedor, producto, causa o referencia):",
-            placeholder="Ej. Carlos Mendoza, Salmón, Vencimiento, FAC-...",
-            key="rep_filtro_texto",
-        ).strip()
-
         if filtro_txt and not df_docs.empty:
             mask = df_docs.astype(str).apply(lambda col: col.str.contains(filtro_txt, case=False, na=False)).any(axis=1)
             df_docs = df_docs[mask]
@@ -5266,13 +5990,25 @@ elif nav_tab == "reportes":
             st.info("No se encontraron documentos para los filtros y rango de fechas seleccionados.")
             return
 
-        col_rk1, col_rk2, col_rk3, col_rk4 = st.columns([1, 1, 1, 1.6])
-        col_rk1.metric("Documentos / Folios", f"{len(df_docs)}")
-        col_rk2.metric("Total Lotes", f"{int(df_docs['total_lotes'].sum())}")
-        col_rk3.metric("Volumen Total", f"{float(df_docs['total_cantidad'].sum()):,.2f}")
-        with col_rk4:
+        col_rk_info, col_rk_btn = st.columns([2.3, 1.3], vertical_alignment="center")
+        with col_rk_info:
+            st.markdown(
+                f"""
+                <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center;
+                            background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;
+                            padding:8px 14px; font-size:0.88rem; color:#334155;">
+                    <span>📄 <strong>{len(df_docs)}</strong> Documentos / Folios</span>
+                    <span style="color:#cbd5e1;">|</span>
+                    <span>📦 <strong>{int(df_docs['total_lotes'].sum())}</strong> Lotes</span>
+                    <span style="color:#cbd5e1;">|</span>
+                    <span>⚖️ <strong>{float(df_docs['total_cantidad'].sum()):,.2f}</strong> Volumen Total</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col_rk_btn:
             st.download_button(
-                label="📚 Descargar Libro Consolidado del Período (PDF)",
+                label="📚 Descargar Libro Consolidado (PDF)",
                 data=lambda _t=rep_tipo, _df=df_consolidado, _loc=rep_local_label, _d=rep_desde, _h=rep_hasta: reportes_pdf.generar_pdf_libro_consolidado(
                     tipo=_t,
                     df=_df,
@@ -5287,12 +6023,53 @@ elif nav_tab == "reportes":
                 on_click="ignore",
             )
 
-        st.dataframe(
-            df_docs[cfg["cols"]],
+        @st.dialog(f"📄 Vista Previa — {cfg['folio_pref']}", width="large")
+        def _mostrar_preview_reporte_pdf(fid: int) -> None:
+            import base64
+
+            st.markdown(f"#### 📄 {cfg['folio_pref']} **N° {fid}**")
+            try:
+                data_pdf = cfg["detail_fn"](int(fid))
+                pdf_bytes = cfg["pdf_fn"](data_pdf)
+                st.download_button(
+                    label=f"⬇️ Descargar {cfg['file_pref']}_{fid}.pdf",
+                    data=pdf_bytes,
+                    file_name=f"{cfg['file_pref']}_{fid}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    width="stretch",
+                    key=f"dl_modal_rep_{rep_tipo}_{fid}",
+                    on_click="ignore",
+                )
+                b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+                st.markdown(
+                    f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
+                    'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as ex_pdf_rep:
+                st.error(f"No se pudo generar la vista previa de {cfg['folio_pref']} #{fid}: {ex_pdf_rep}")
+
+        st.caption(f"📄 Haz clic en el cuadro de selección de cualquier fila para abrir la vista previa oficial ({cfg['folio_pref']}) en PDF.")
+        df_rep_view = df_docs[cfg["cols"]].reset_index(drop=True)
+        evt_rep = st.dataframe(
+            df_rep_view,
             width="stretch",
+            height=340,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"df_rep_tabla_{rep_tipo}",
             column_config=cfg["col_cfg"],
         )
+
+        sel_prev_key = f"_rep_sel_prev_{rep_tipo}"
+        sel_rows_rep = list(evt_rep.selection.rows) if evt_rep and evt_rep.selection else []
+        if sel_rows_rep != st.session_state.get(sel_prev_key, []):
+            st.session_state[sel_prev_key] = sel_rows_rep
+            if sel_rows_rep:
+                fid_sel = int(df_rep_view.iloc[sel_rows_rep[0]][cfg["id_col"]])
+                _mostrar_preview_reporte_pdf(fid_sel)
 
         st.markdown("---")
         st.markdown("#### 📄 Emisión y Vista Previa de Documento Individual (PDF)")

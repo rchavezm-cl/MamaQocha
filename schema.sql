@@ -148,6 +148,9 @@ CREATE INDEX IF NOT EXISTS ix_movimientos_fecha ON movimientos(fecha_movimiento)
 CREATE INDEX IF NOT EXISTS ix_movimientos_origen ON movimientos(id_local_origen);
 CREATE INDEX IF NOT EXISTS ix_movimientos_destino ON movimientos(id_local_destino);
 CREATE INDEX IF NOT EXISTS ix_detalle_movimiento_lote ON detalle_movimiento(id_lote);
+CREATE INDEX IF NOT EXISTS ix_stock_activo_local ON stock_lote_local(id_local) WHERE cantidad > 0;
+CREATE INDEX IF NOT EXISTS ix_movimientos_merma ON movimientos(fecha_movimiento) WHERE referencia LIKE 'MERMA:%';
+CREATE INDEX IF NOT EXISTS ix_movimientos_prod ON movimientos(fecha_movimiento, id_local_origen) WHERE tipo_movimiento = 'salida_cocina' AND estado = 'confirmado' AND referencia LIKE 'PRODUCCIÓN%';
 CREATE INDEX IF NOT EXISTS ix_receta_ingredientes_receta ON receta_ingredientes(id_receta);
 CREATE INDEX IF NOT EXISTS ix_receta_ingredientes_producto ON receta_ingredientes(id_producto);
 
