@@ -1502,6 +1502,81 @@ def load_estadisticas_mermas_causa(id_local: Optional[int] = None) -> pd.DataFra
         return df
 
 
+def load_rango_fechas_ventas() -> tuple[date, date]:
+    """Retorna la fecha mínima y máxima con salidas operativas de cocina registradas."""
+    query = text(
+        """
+        SELECT
+            MIN(DATE(fecha_movimiento)) AS fecha_min,
+            MAX(DATE(fecha_movimiento)) AS fecha_max
+        FROM movimientos
+        WHERE tipo_movimiento = 'salida_cocina'
+          AND estado = 'confirmado'
+          AND COALESCE(referencia, '') LIKE 'PRODUCCIÓN%';
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(query).fetchone()
+    if row and row[0] is not None and row[1] is not None:
+        return row[0], row[1]
+    hoy = date.today()
+    return hoy, hoy
+
+
+def load_ranking_platos_ventas(
+    fecha_inicio: date,
+    fecha_fin: date,
+    id_local: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Retorna el ranking de platos vendidos/preparados en cocina en un tramo de fechas,
+    con filtro opcional por local o consolidado de toda la cadena.
+    """
+    where_local = "AND m.id_local_origen = :id_local" if id_local else ""
+    query = text(
+        f"""
+        WITH ventas_base AS (
+            SELECT
+                TRIM(SUBSTRING(m.referencia FROM POSITION(':' IN m.referencia) + 1)) AS plato,
+                m.id_movimiento,
+                dm.cantidad
+            FROM movimientos AS m
+            JOIN detalle_movimiento AS dm ON dm.id_movimiento = m.id_movimiento
+            WHERE m.tipo_movimiento = 'salida_cocina'
+              AND m.estado = 'confirmado'
+              AND COALESCE(m.referencia, '') LIKE 'PRODUCCIÓN%'
+              AND DATE(m.fecha_movimiento) BETWEEN :fecha_inicio AND :fecha_fin
+              {where_local}
+        )
+        SELECT
+            vb.plato,
+            COALESCE(r.categoria, 'Sin categoría') AS categoria,
+            COUNT(DISTINCT vb.id_movimiento) AS total_ordenes,
+            ROUND(SUM(vb.cantidad)::numeric, 3) AS total_kg,
+            ROUND((SUM(vb.cantidad) / :kg_plato)::numeric, 0) AS platos_est,
+            ROUND(((SUM(vb.cantidad) / :kg_plato) * COALESCE(r.precio_venta, 0))::numeric, 0) AS venta_estimada_clp,
+            ROUND(
+                (100.0 * SUM(vb.cantidad) / NULLIF(SUM(SUM(vb.cantidad)) OVER (), 0))::numeric,
+                1
+            ) AS pct_participacion
+        FROM ventas_base AS vb
+        LEFT JOIN recetas AS r ON r.nombre = vb.plato
+        GROUP BY vb.plato, r.categoria, r.precio_venta
+        ORDER BY total_kg DESC, vb.plato ASC;
+        """
+    )
+    params: Dict[str, Any] = {
+        "fecha_inicio": fecha_inicio,
+        "fecha_fin": fecha_fin,
+        "kg_plato": KG_POR_PLATO_ESTANDAR,
+    }
+    if id_local:
+        params["id_local"] = int(id_local)
+
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
 def registrar_traslado_local(
     id_local_origen: int,
     id_local_destino: int,

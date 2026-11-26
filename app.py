@@ -103,6 +103,20 @@ def _c_top_riesgo_traslado(id_local: int, limit: int = 7) -> pd.DataFrame:
     return db.load_top_riesgo_traslado(id_local, limit=limit)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_rango_fechas_ventas() -> tuple[date, date]:
+    return db.load_rango_fechas_ventas()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _c_ranking_platos_ventas(
+    fecha_inicio: date,
+    fecha_fin: date,
+    id_local: Optional[int] = None,
+) -> pd.DataFrame:
+    return db.load_ranking_platos_ventas(fecha_inicio, fecha_fin, id_local=id_local)
+
+
 def _obtener_ip_local_red() -> str:
     """Detecta la IP local del servidor en la red Wi-Fi o Ethernet para conectar tablets."""
     import socket
@@ -2088,10 +2102,10 @@ if locales_df.empty:
 # CONTROL DE ACCESO Y PERFILES DE USUARIO (RBAC)
 # ==============================================================================
 PERMISOS_POR_ROL: dict[str, list[str]] = {
-    "administrador": ["alertas", "recepcion", "cocina", "traslados", "mermas", "trazabilidad", "reportes", "maestros"],
-    "jefe_cocina": ["alertas", "cocina", "traslados", "mermas", "trazabilidad", "reportes"],
+    "administrador": ["alertas", "recepcion", "cocina", "traslados", "mermas", "top_platos", "trazabilidad", "reportes", "maestros"],
+    "jefe_cocina": ["alertas", "cocina", "traslados", "mermas", "top_platos", "trazabilidad", "reportes"],
     "bodeguero": ["alertas", "recepcion", "traslados", "trazabilidad"],
-    "cocinero": ["alertas", "cocina", "mermas"],
+    "cocinero": ["alertas", "cocina", "mermas", "top_platos"],
     "operador": ["alertas", "trazabilidad"],
     "cajero_garzon": ["alertas", "trazabilidad"],
 }
@@ -2381,6 +2395,7 @@ NAV_MODULOS = {
     "cocina": "🍳 Cocina (FEFO)",
     "traslados": "🚚 Traspasos",
     "mermas": "🗑️ Mermas",
+    "top_platos": "🍽️ Top 5 Platos",
     "trazabilidad": "🔍 Trazabilidad",
     "reportes": "🖨️ Reportes PDF",
     "maestros": "⚙️ Maestros",
@@ -5942,4 +5957,232 @@ elif nav_tab == "maestros":
                                     st.rerun()
                                 except Exception as ex_mod_u:
                                     st.error(f"Error al actualizar usuario: {str(ex_mod_u)}")
+
+elif nav_tab == "top_platos":
+    st.markdown(
+        """
+        <div class="module-header-compact">
+            <h3 class="module-header-title">🍽️ Top 5 Platos Vendidos</h3>
+            <div class="module-header-sub">Ranking de demanda por cadena o sucursal con proporción en gráfico de dona y tramo de fechas</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    f_min_disp, f_max_disp = _c_rango_fechas_ventas()
+
+    with st.container(border=True):
+        col_f1, col_f2, col_f3 = st.columns([1.2, 1.4, 1.4], vertical_alignment="bottom")
+        with col_f1:
+            opciones_ambito = {0: "🏢 Toda la cadena (5 Locales)"}
+            for _, loc_row in locales_df.iterrows():
+                opciones_ambito[int(loc_row["id_local"])] = f"📍 {loc_row['nombre']}"
+            idx_default_amb = 0
+            if id_local_activo is not None and int(id_local_activo) in opciones_ambito:
+                idx_default_amb = list(opciones_ambito.keys()).index(int(id_local_activo))
+            ambito_sel = st.selectbox(
+                "Ámbito de análisis:",
+                options=list(opciones_ambito.keys()),
+                format_func=lambda k: opciones_ambito[k],
+                index=idx_default_amb,
+                key="top_platos_ambito",
+            )
+            id_local_top = None if ambito_sel == 0 else int(ambito_sel)
+
+        with col_f2:
+            preset_rango = st.selectbox(
+                "Tramo rápido:",
+                options=["Todo el período", "Últimos 7 días", "Últimos 2 días", "Solo último día"],
+                index=0,
+                key="top_platos_preset",
+            )
+
+        if preset_rango == "Solo último día":
+            def_ini, def_fin = f_max_disp, f_max_disp
+        elif preset_rango == "Últimos 2 días":
+            def_ini = max(f_min_disp, f_max_disp - timedelta(days=1))
+            def_fin = f_max_disp
+        elif preset_rango == "Últimos 7 días":
+            def_ini = max(f_min_disp, f_max_disp - timedelta(days=6))
+            def_fin = f_max_disp
+        else:
+            def_ini, def_fin = f_min_disp, f_max_disp
+
+        with col_f3:
+            rango_fechas = st.date_input(
+                "Rango de fechas:",
+                value=(def_ini, def_fin),
+                min_value=f_min_disp,
+                max_value=f_max_disp,
+                key=f"top_platos_fechas_{preset_rango}",
+            )
+
+    if isinstance(rango_fechas, (tuple, list)) and len(rango_fechas) == 2:
+        fecha_ini_top, fecha_fin_top = rango_fechas[0], rango_fechas[1]
+    elif isinstance(rango_fechas, (tuple, list)) and len(rango_fechas) == 1:
+        fecha_ini_top = fecha_fin_top = rango_fechas[0]
+    else:
+        fecha_ini_top = fecha_fin_top = rango_fechas
+
+    if fecha_ini_top > fecha_fin_top:
+        fecha_ini_top, fecha_fin_top = fecha_fin_top, fecha_ini_top
+
+    df_ranking = _c_ranking_platos_ventas(fecha_ini_top, fecha_fin_top, id_local=id_local_top)
+
+    if df_ranking.empty:
+        st.info("No se registran salidas operativas de platos en el tramo de fechas y ámbito seleccionados.")
+    else:
+        total_platos_per = int(df_ranking["platos_est"].sum())
+        total_kg_per = float(df_ranking["total_kg"].sum())
+        total_venta_per = float(df_ranking["venta_estimada_clp"].sum())
+        lider_row = df_ranking.iloc[0]
+
+        ck1, ck2, ck3 = st.columns(3)
+        with ck1:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-label">🍽️ Platos Estimados</div>
+                    <div class="op-kpi-val">{total_platos_per:,}</div>
+                    <div class="op-kpi-sub">{fecha_ini_top.strftime('%d/%m/%Y')} al {fecha_fin_top.strftime('%d/%m/%Y')}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with ck2:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-label">⚖️ Volumen & Venta Est.</div>
+                    <div class="op-kpi-val">{total_kg_per:,.2f} kg</div>
+                    <div class="op-kpi-sub">${total_venta_per:,.0f} CLP</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with ck3:
+            st.markdown(
+                f"""
+                <div class="op-kpi-card">
+                    <div class="op-kpi-label">🏆 Plato Líder (#1)</div>
+                    <div class="op-kpi-val" style="font-size:1.05rem;">{lider_row['plato']}</div>
+                    <div class="op-kpi-sub">{int(lider_row['platos_est']):,} platos ({lider_row['pct_participacion']}%)</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        df_top5 = df_ranking.head(5).copy().reset_index(drop=True)
+        df_otros = df_ranking.iloc[5:]
+
+        col_donut, col_tabla = st.columns([1.05, 1.25], vertical_alignment="top")
+
+        with col_donut:
+            with st.container(border=True):
+                st.markdown(f"##### 🍩 Proporción Top 5 — {opciones_ambito[ambito_sel]}")
+                colores_top5 = ["#0f4c5c", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"]
+                donut_platos_data = [
+                    {
+                        "name": str(row["plato"]),
+                        "value": int(row["platos_est"]),
+                        "itemStyle": {"color": colores_top5[idx % len(colores_top5)]},
+                    }
+                    for idx, row in df_top5.iterrows()
+                ]
+                if not df_otros.empty:
+                    platos_otros = int(df_otros["platos_est"].sum())
+                    if platos_otros > 0:
+                        donut_platos_data.append(
+                            {
+                                "name": f"Otros ({len(df_otros)} platos)",
+                                "value": platos_otros,
+                                "itemStyle": {"color": "#cbd5e1"},
+                            }
+                        )
+
+                option_donut_platos = {
+                    "tooltip": {
+                        "trigger": "item",
+                        "formatter": "{b}<br/><b>{c} platos</b> ({d}%)",
+                    },
+                    "legend": {
+                        "bottom": "0%",
+                        "left": "center",
+                        "icon": "circle",
+                        "textStyle": {"fontSize": 10.5, "color": "#475569"},
+                    },
+                    "series": [
+                        {
+                            "name": "Top 5 Platos",
+                            "type": "pie",
+                            "radius": ["46%", "72%"],
+                            "center": ["50%", "42%"],
+                            "avoidLabelOverlap": True,
+                            "itemStyle": {
+                                "borderRadius": 6,
+                                "borderColor": "#ffffff",
+                                "borderWidth": 2,
+                            },
+                            "label": {
+                                "show": True,
+                                "formatter": "{d}%",
+                                "fontSize": 11,
+                                "fontWeight": "bold",
+                            },
+                            "emphasis": {
+                                "scale": True,
+                                "scaleSize": 5,
+                            },
+                            "data": donut_platos_data,
+                        }
+                    ],
+                }
+                render_echarts(
+                    option_donut_platos,
+                    height=340,
+                    key=f"donut_top5_{ambito_sel}_{fecha_ini_top}_{fecha_fin_top}",
+                )
+
+        with col_tabla:
+            with st.container(border=True):
+                st.markdown("##### 📊 Ranking Top 5 Platos")
+                df_top5_view = df_top5.copy()
+                df_top5_view.insert(0, "Rank", [f"#{i + 1}" for i in range(len(df_top5_view))])
+                st.dataframe(
+                    df_top5_view[
+                        ["Rank", "plato", "categoria", "platos_est", "total_kg", "pct_participacion", "venta_estimada_clp"]
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Rank": st.column_config.TextColumn("#", width="small"),
+                        "plato": st.column_config.TextColumn("Plato"),
+                        "categoria": st.column_config.TextColumn("Categoría"),
+                        "platos_est": st.column_config.NumberColumn("Platos Est.", format="%d"),
+                        "total_kg": st.column_config.NumberColumn("Volumen (kg)", format="%.2f"),
+                        "pct_participacion": st.column_config.NumberColumn("Proporción", format="%.1f%%"),
+                        "venta_estimada_clp": st.column_config.NumberColumn("Venta Est.", format="$%d"),
+                    },
+                )
+
+                with st.expander(f"📋 Ver desglose completo ({len(df_ranking)} platos)", expanded=False):
+                    df_all_view = df_ranking.copy()
+                    df_all_view.insert(0, "Rank", [f"#{i + 1}" for i in range(len(df_all_view))])
+                    st.dataframe(
+                        df_all_view[
+                            ["Rank", "plato", "categoria", "platos_est", "total_kg", "pct_participacion", "venta_estimada_clp"]
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "Rank": st.column_config.TextColumn("#", width="small"),
+                            "plato": st.column_config.TextColumn("Plato"),
+                            "categoria": st.column_config.TextColumn("Categoría"),
+                            "platos_est": st.column_config.NumberColumn("Platos Est.", format="%d"),
+                            "total_kg": st.column_config.NumberColumn("Volumen (kg)", format="%.2f"),
+                            "pct_participacion": st.column_config.NumberColumn("Proporción", format="%.1f%%"),
+                            "venta_estimada_clp": st.column_config.NumberColumn("Venta Est.", format="$%d"),
+                        },
+                    )
+
 
