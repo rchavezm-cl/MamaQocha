@@ -1,9 +1,8 @@
 import os
 import json
-import tempfile
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -1749,16 +1748,84 @@ def _render_doh_interactivo(
 
 
 def _render_pdf_preview(pdf_bytes: bytes, height: int = 580) -> None:
-    """Renderiza una vista previa PDF via media storage de Streamlit (evita bloqueo de data: URLs en Chrome)."""
-    tmp_path: Optional[Path] = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = Path(tmp.name)
-        st.iframe(tmp_path, width="stretch", height=height)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    """Renderiza una vista previa PDF con PDF.js en canvas dentro de st.iframe (compatible con Chrome y Firefox)."""
+    b64_pdf = base64.b64encode(pdf_bytes).decode("ascii")
+    html_code = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    padding: 12px;
+    background: #f1f5f9;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }}
+  #status {{
+    color: #475569;
+    font-size: 13px;
+    padding: 24px 12px;
+    text-align: center;
+  }}
+  canvas {{
+    display: block;
+    max-width: 100%;
+    height: auto;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  }}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+</head>
+<body>
+<div id="status">Cargando vista previa PDF...</div>
+<div id="pages"></div>
+<script>
+(async function() {{
+  const statusEl = document.getElementById('status');
+  const pagesEl = document.getElementById('pages');
+  try {{
+    if (typeof pdfjsLib === 'undefined') {{
+      throw new Error('No se pudo cargar el visor PDF.js');
+    }}
+    const raw = atob("{b64_pdf}");
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) {{
+      bytes[i] = raw.charCodeAt(i);
+    }}
+    const pdf = await pdfjsLib.getDocument({{ data: bytes, disableWorker: true }}).promise;
+    statusEl.remove();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const targetWidth = Math.max((document.body.clientWidth || 720) - 28, 320);
+    for (let p = 1; p <= pdf.numPages; p++) {{
+      const page = await pdf.getPage(p);
+      const baseVp = page.getViewport({{ scale: 1 }});
+      const scale = targetWidth / baseVp.width;
+      const vp = page.getViewport({{ scale: scale * dpr }});
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      canvas.style.width = Math.floor(vp.width / dpr) + 'px';
+      canvas.style.height = Math.floor(vp.height / dpr) + 'px';
+      if (p > 1) canvas.style.marginTop = '12px';
+      pagesEl.appendChild(canvas);
+      await page.render({{ canvasContext: canvas.getContext('2d'), viewport: vp }}).promise;
+    }}
+  }} catch (err) {{
+    statusEl.textContent = 'No se pudo mostrar la vista previa en el navegador (' + (err && err.message ? err.message : err) + '). Usa el botón de descarga superior.';
+  }}
+}})();
+</script>
+</body>
+</html>"""
+    st.iframe(html_code, width="stretch", height=height)
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL Y ESTILOS
