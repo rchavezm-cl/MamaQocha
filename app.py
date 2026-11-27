@@ -1821,7 +1821,7 @@ st.markdown(
         gap: 8px;
         margin: 0;
         padding: 2px 0;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
     }
     .module-header-title {
         font-size: 1.25rem;
@@ -5434,7 +5434,7 @@ elif nav_tab == "mermas":
 # TAB 6: TRAZABILIDAD POR LOTE CON LÍNEA DE TIEMPO VISUAL
 # ==============================================================================
 elif nav_tab == "trazabilidad":
-    col_traz_head1, col_traz_head2 = st.columns([1.1, 1.9], vertical_alignment="center")
+    col_traz_head1, col_traz_head2 = st.columns([1.55, 1.45], vertical_alignment="center")
     with col_traz_head1:
         st.markdown(
             """
@@ -5773,11 +5773,16 @@ elif nav_tab == "reportes":
 
             col_rf1, col_rf2, col_rf3, col_rf4 = st.columns([1.5, 1.2, 0.75, 0.75], vertical_alignment="bottom")
             with col_rf1:
+                filtro_placeholder = (
+                    "N° lote, código ref., producto o proveedor..."
+                    if rep_tipo == "lote"
+                    else "Folio, manipulador, proveedor, producto, FAC-..."
+                )
                 filtro_txt = st.text_input(
                     "🔎 Búsqueda rápida:",
-                    placeholder="Folio, manipulador, proveedor, producto, FAC-...",
+                    placeholder=filtro_placeholder,
                     key="rep_filtro_texto",
-                ).strip() if rep_tipo != "lote" else ""
+                ).strip()
             with col_rf2:
                 if local_activo_id:
                     rep_local_id = local_activo_id
@@ -5815,41 +5820,164 @@ elif nav_tab == "reportes":
 
         if rep_tipo == "lote":
             lotes_rep_df = _c_lotes_selector()
+            if not lotes_rep_df.empty and (
+                "fecha_recepcion" not in lotes_rep_df.columns
+                or "local_receptor" not in lotes_rep_df.columns
+            ):
+                _c_lotes_selector.clear()
+                lotes_rep_df = _c_lotes_selector()
+
             if lotes_rep_df.empty:
                 st.info("No hay lotes registrados en la base de datos.")
                 return
 
-            opc_lotes_rep = {
-                int(row["id_lote"]): row["display_label"]
-                for _, row in lotes_rep_df.iterrows()
-            }
-            lote_rep_sel = st.selectbox(
-                "Selecciona el Lote para generar su Expediente Completo SEREMI:",
-                options=list(opc_lotes_rep.keys()),
-                format_func=lambda k: opc_lotes_rep[k],
-                key="rep_sel_lote_e2e",
+            df_lotes_filt = lotes_rep_df.copy()
+            df_lotes_filt["_fecha_rec_dt"] = pd.to_datetime(df_lotes_filt["fecha_recepcion"]).dt.date
+
+            if rep_local_id is not None:
+                df_lotes_filt = df_lotes_filt[df_lotes_filt["local_receptor"] == rep_local_label]
+
+            df_lotes_filt = df_lotes_filt[
+                (df_lotes_filt["_fecha_rec_dt"] >= rep_desde)
+                & (df_lotes_filt["_fecha_rec_dt"] <= rep_hasta)
+            ]
+
+            if filtro_txt:
+                q_lote = filtro_txt.lower()
+                mask_lote = (
+                    df_lotes_filt["id_lote"].astype(str).str.contains(q_lote, case=False, na=False)
+                    | df_lotes_filt["codigo_lote_proveedor"].astype(str).str.lower().str.contains(q_lote, na=False)
+                    | df_lotes_filt["producto"].astype(str).str.lower().str.contains(q_lote, na=False)
+                    | df_lotes_filt["proveedor"].astype(str).str.lower().str.contains(q_lote, na=False)
+                )
+                df_lotes_filt = df_lotes_filt[mask_lote]
+
+            st.caption(
+                f"Mostrando **{len(df_lotes_filt)}** de **{len(lotes_rep_df)}** lotes registrados. "
+                "Haz clic en una fila para seleccionar el lote y generar su Expediente SEREMI."
             )
+            if df_lotes_filt.empty:
+                st.warning("No se encontraron lotes que coincidan con los filtros aplicados.")
+                return
+
+            cols_lote_view = [
+                "id_lote",
+                "producto",
+                "codigo_lote_proveedor",
+                "proveedor",
+                "local_receptor",
+                "fecha_recepcion",
+                "fecha_vencimiento",
+            ]
+            df_lotes_view = df_lotes_filt[cols_lote_view].reset_index(drop=True)
+            evt_lotes = st.dataframe(
+                df_lotes_view,
+                width="stretch",
+                height=240,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="df_rep_lotes_selector",
+                column_config={
+                    "id_lote": st.column_config.NumberColumn("Lote #", format="#%d", width="small"),
+                    "producto": "Producto",
+                    "codigo_lote_proveedor": "Ref. Proveedor",
+                    "proveedor": "Proveedor",
+                    "local_receptor": "Sucursal",
+                    "fecha_recepcion": st.column_config.DateColumn("Recepción", format="DD/MM/YYYY"),
+                    "fecha_vencimiento": st.column_config.DateColumn("Vencimiento", format="DD/MM/YYYY"),
+                },
+            )
+
+            @st.dialog("📄 Vista Previa — Expediente por Lote SEREMI", width="large")
+            def _mostrar_preview_expediente_lote_pdf(id_lote_pdf: int) -> None:
+                import base64
+
+                st.markdown(f"#### 📦 Expediente Completo SEREMI — **Lote #{id_lote_pdf}**")
+                try:
+                    traz_modal = _c_trazabilidad_lote(int(id_lote_pdf))
+                    if not traz_modal:
+                        st.warning(f"No se encontró información de trazabilidad para el Lote #{id_lote_pdf}.")
+                        return
+                    pdf_bytes = reportes_pdf.generar_pdf_expediente_lote(traz_modal)
+                    st.download_button(
+                        label=f"⬇️ Descargar Expediente_SEREMI_Lote_{id_lote_pdf}.pdf",
+                        data=pdf_bytes,
+                        file_name=f"Expediente_SEREMI_Lote_{id_lote_pdf}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        width="stretch",
+                        key=f"dl_modal_rep_lote_{id_lote_pdf}",
+                        on_click="ignore",
+                    )
+                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+                    st.markdown(
+                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
+                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
+                        unsafe_allow_html=True,
+                    )
+                except Exception as ex_pdf_lote:
+                    st.error(f"No se pudo generar la vista previa del Lote #{id_lote_pdf}: {ex_pdf_lote}")
+
+            sel_rows_lote = list(evt_lotes.selection.rows) if evt_lotes and evt_lotes.selection else []
+            sel_prev_lote_key = "_rep_sel_prev_lote"
+            if sel_rows_lote != st.session_state.get(sel_prev_lote_key, []):
+                st.session_state[sel_prev_lote_key] = sel_rows_lote
+                if sel_rows_lote:
+                    id_lote_click = int(df_lotes_view.iloc[sel_rows_lote[0]]["id_lote"])
+                    _mostrar_preview_expediente_lote_pdf(id_lote_click)
+
+            idx_lote_sel = sel_rows_lote[0] if sel_rows_lote else 0
+            row_lote_sel = df_lotes_view.iloc[idx_lote_sel]
+            lote_rep_sel = int(row_lote_sel["id_lote"])
+
+            st.markdown(
+                f"##### 📦 Expediente Activo: Lote #{lote_rep_sel} — {row_lote_sel['producto']} "
+                f"`Ref: {row_lote_sel['codigo_lote_proveedor']}`"
+            )
+
             traz_rep = _c_trazabilidad_lote(lote_rep_sel)
             if traz_rep:
                 info_l = traz_rep["info"]
                 movs_l = traz_rep["movimientos"]
                 stock_l = traz_rep["stock_locales"]
                 c_l1, c_l2, c_l3, c_l4 = st.columns(4)
-                c_l1.metric("Proveedor", str(info_l["proveedor"])[:24])
-                c_l2.metric("Temp. Ingreso HACCP", f"{float(info_l.get('temperatura_recepcion', 2.0)):.1f} °C")
-                c_l3.metric("Recepcionado por", str(info_l.get("recibido_por", "Operador Central")))
-                c_l4.metric("Eventos en Cadena", f"{len(movs_l)} mov.")
+                with c_l1:
+                    with st.container(border=True):
+                        st.caption("Proveedor")
+                        st.markdown(f"**{info_l['proveedor']}**")
+                with c_l2:
+                    with st.container(border=True):
+                        st.caption("Temp. Ingreso HACCP")
+                        st.markdown(f"**{float(info_l.get('temperatura_recepcion', 2.0)):.1f} °C**")
+                with c_l3:
+                    with st.container(border=True):
+                        st.caption("Recepcionado por")
+                        st.markdown(f"**{info_l.get('recibido_por', 'Operador Central')}**")
+                with c_l4:
+                    with st.container(border=True):
+                        st.caption("Eventos en Cadena")
+                        st.markdown(f"**{len(movs_l)} mov.**")
 
-                st.download_button(
-                    label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info_l['id_lote']} (PDF)",
-                    data=lambda _t=traz_rep: reportes_pdf.generar_pdf_expediente_lote(_t),
-                    file_name=f"Expediente_SEREMI_Lote_{info_l['id_lote']}.pdf",
-                    mime="application/pdf",
-                    type="primary",
-                    width="stretch",
-                    key=f"rep_btn_pdf_lote_{info_l['id_lote']}",
-                    on_click="ignore",
-                )
+                col_btn_dl_lote, col_btn_prev_lote = st.columns([2, 1])
+                with col_btn_dl_lote:
+                    st.download_button(
+                        label=f"🖨️ Descargar Expediente Completo SEREMI — Lote #{info_l['id_lote']} (PDF)",
+                        data=lambda _t=traz_rep: reportes_pdf.generar_pdf_expediente_lote(_t),
+                        file_name=f"Expediente_SEREMI_Lote_{info_l['id_lote']}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        width="stretch",
+                        key=f"rep_btn_pdf_lote_{info_l['id_lote']}",
+                        on_click="ignore",
+                    )
+                with col_btn_prev_lote:
+                    if st.button(
+                        "👁️ Vista Previa PDF",
+                        key=f"rep_btn_preview_lote_{info_l['id_lote']}",
+                        width="stretch",
+                    ):
+                        _mostrar_preview_expediente_lote_pdf(int(info_l["id_lote"]))
                 if not movs_l.empty:
                     st.markdown("##### 👥 Manipuladores y Custodia del Lote")
                     st.dataframe(movs_l, width="stretch", hide_index=True)
@@ -6489,6 +6617,11 @@ elif nav_tab == "maestros":
 
         recetas_cat_df = _c_recetas_catalogo(solo_activas=False)
         recetas_det_df = _c_recetas(solo_activas=False)
+        if not recetas_cat_df.empty and "indicaciones_preparacion" not in recetas_cat_df.columns:
+            _c_recetas_catalogo.clear()
+            _c_recetas.clear()
+            recetas_cat_df = _c_recetas_catalogo(solo_activas=False)
+            recetas_det_df = _c_recetas(solo_activas=False)
 
         if recetas_cat_df.empty:
             st.info("No hay recetas registradas en el catálogo maestro.")
@@ -6498,12 +6631,44 @@ elif nav_tab == "maestros":
             col_mr2.metric("Categorías de Menú", f"{recetas_cat_df['categoria'].nunique()}")
             col_mr3.metric("Ticket Promedio Carta", f"${recetas_cat_df['precio_venta'].mean():,.0f} CLP")
 
-            st.dataframe(
-                recetas_cat_df[[
-                    "id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min", "escandallo_ingredientes", "activo"
-                ]],
+            @st.dialog("📄 Vista Previa — Ficha Técnica de Receta (PDF)", width="large")
+            def _mostrar_preview_receta_pdf(rec_dict: dict, ings_df: pd.DataFrame) -> None:
+                import base64
+
+                st.markdown(f"#### 🍽️ {rec_dict['receta']} — **Receta #{int(rec_dict['id_receta'])}**")
+                try:
+                    pdf_bytes = reportes_pdf.generar_pdf_receta_plato(rec_dict, ings_df)
+                    safe_name = str(rec_dict["receta"]).replace(" ", "_")
+                    st.download_button(
+                        label=f"⬇️ Descargar Ficha_Receta_{int(rec_dict['id_receta'])}_{safe_name}.pdf",
+                        data=pdf_bytes,
+                        file_name=f"Ficha_Receta_{int(rec_dict['id_receta'])}_{safe_name}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        width="stretch",
+                        key=f"dl_modal_receta_{int(rec_dict['id_receta'])}",
+                        on_click="ignore",
+                    )
+                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+                    st.markdown(
+                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
+                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
+                        unsafe_allow_html=True,
+                    )
+                except Exception as ex_pdf_rec:
+                    st.error(f"No se pudo generar la vista previa de la receta: {ex_pdf_rec}")
+
+            st.caption("👆 Haz clic en cualquier plato de la tabla para desplegar su preparación paso a paso y habilitar la vista previa en PDF.")
+            df_rec_view = recetas_cat_df[[
+                "id_receta", "receta", "categoria", "precio_venta", "tiempo_preparacion_min", "escandallo_ingredientes", "activo"
+            ]].reset_index(drop=True)
+            evt_recetas = st.dataframe(
+                df_rec_view,
                 width="stretch",
                 hide_index=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                key="df_maestro_recetas_tbl",
                 column_config={
                     "id_receta": st.column_config.NumberColumn("ID", width="small"),
                     "receta": "Nombre del Plato",
@@ -6514,6 +6679,74 @@ elif nav_tab == "maestros":
                     "activo": st.column_config.CheckboxColumn("Activo", width="small"),
                 },
             )
+
+            sel_rows_rec = list(evt_recetas.selection.rows) if evt_recetas and evt_recetas.selection else []
+            if sel_rows_rec:
+                row_rec_sel = df_rec_view.iloc[sel_rows_rec[0]]
+                id_rec_sel = int(row_rec_sel["id_receta"])
+                rec_full_row = recetas_cat_df[recetas_cat_df["id_receta"] == id_rec_sel].iloc[0].to_dict()
+                ings_rec_sel = recetas_det_df[recetas_det_df["id_receta"] == id_rec_sel].copy()
+
+                with st.container(border=True):
+                    col_rec_tit, col_rec_prev, col_rec_dl = st.columns([2.2, 1.0, 1.0], vertical_alignment="center")
+                    with col_rec_tit:
+                        st.markdown(f"#### 🍽️ {rec_full_row['receta']}")
+                        st.caption(
+                            f"Categoría: **{rec_full_row['categoria']}** · "
+                            f"Tiempo estándar: **{int(rec_full_row['tiempo_preparacion_min'])} min** · "
+                            f"Precio carta: **${float(rec_full_row['precio_venta']):,.0f} CLP**"
+                        )
+                    with col_rec_prev:
+                        if st.button(
+                            "👁️ Preview PDF",
+                            type="primary",
+                            width="stretch",
+                            key=f"btn_prev_pdf_receta_{id_rec_sel}",
+                        ):
+                            _mostrar_preview_receta_pdf(rec_full_row, ings_rec_sel)
+                    with col_rec_dl:
+                        safe_rec_fn = str(rec_full_row["receta"]).replace(" ", "_")
+                        st.download_button(
+                            label="⬇️ Descargar PDF",
+                            data=lambda _r=rec_full_row, _i=ings_rec_sel: reportes_pdf.generar_pdf_receta_plato(_r, _i),
+                            file_name=f"Ficha_Receta_{id_rec_sel}_{safe_rec_fn}.pdf",
+                            mime="application/pdf",
+                            width="stretch",
+                            key=f"btn_dl_pdf_receta_{id_rec_sel}",
+                            on_click="ignore",
+                        )
+
+                    col_rec_ing, col_rec_pasos = st.columns([1.0, 1.5])
+                    with col_rec_ing:
+                        st.markdown("##### 🥩 Escandallo por Porción")
+                        if ings_rec_sel.empty:
+                            st.info("Sin ingredientes asociados.")
+                        else:
+                            st.dataframe(
+                                ings_rec_sel[["ingrediente", "cantidad_kg", "unidad_medida"]],
+                                width="stretch",
+                                hide_index=True,
+                                column_config={
+                                    "ingrediente": "Materia Prima",
+                                    "cantidad_kg": st.column_config.NumberColumn("Cantidad", format="%.3f"),
+                                    "unidad_medida": "Unidad",
+                                },
+                            )
+                    with col_rec_pasos:
+                        st.markdown("##### 👨‍🍳 Preparación Paso a Paso")
+                        pasos_txt = str(rec_full_row.get("indicaciones_preparacion") or "").strip()
+                        pasos_lista = [p.strip() for p in pasos_txt.splitlines() if p.strip()]
+                        if not pasos_lista:
+                            st.info("Este plato aún no tiene indicaciones de preparación registradas.")
+                        else:
+                            for idx_p, linea_p in enumerate(pasos_lista, start=1):
+                                texto_p = linea_p
+                                if len(texto_p) > 2 and texto_p[0].isdigit():
+                                    for sep in (". ", ") ", "- "):
+                                        if sep in texto_p[:5]:
+                                            texto_p = texto_p.split(sep, 1)[1].strip()
+                                            break
+                                st.markdown(f"**Paso {idx_p}.** {texto_p}")
 
             with st.expander("🔍 Ver Detalle de Gramajes por Plato (Ficha Técnica Desglosada)"):
                 st.dataframe(

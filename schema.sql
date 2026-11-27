@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS recetas (
  categoria VARCHAR(60) NOT NULL,
  tiempo_preparacion_min INT DEFAULT 18,
  precio_venta NUMERIC(10,2) NOT NULL,
+ indicaciones_preparacion TEXT,
  activo BOOLEAN NOT NULL DEFAULT TRUE,
  creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

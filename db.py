@@ -2034,6 +2034,7 @@ def load_recetas(solo_activas: bool = True) -> pd.DataFrame:
             r.categoria,
             r.tiempo_preparacion_min,
             r.precio_venta,
+            COALESCE(r.indicaciones_preparacion, '') AS indicaciones_preparacion,
             r.activo,
             p.id_producto,
             p.nombre AS ingrediente,
@@ -2060,7 +2061,14 @@ def load_recetas_catalogo(solo_activas: bool = True) -> pd.DataFrame:
         ings = [f"{row['ingrediente']} ({row['cantidad_kg']:.3f} {row['unidad_medida']})" for _, row in grupo.iterrows()]
         return ", ".join(ings)
 
-    resumen = df_raw.groupby(["id_receta", "receta", "categoria", "tiempo_preparacion_min", "precio_venta", "activo"]).apply(agrupar_ingredientes).reset_index(name="escandallo_ingredientes")
+    resumen = (
+        df_raw.groupby(
+            ["id_receta", "receta", "categoria", "tiempo_preparacion_min", "precio_venta", "indicaciones_preparacion", "activo"],
+            dropna=False,
+        )
+        .apply(agrupar_ingredientes)
+        .reset_index(name="escandallo_ingredientes")
+    )
     return resumen.sort_values(by=["categoria", "receta"])
 
 

@@ -1353,3 +1353,136 @@ def generar_pdf_libro_consolidado(
     story.append(Spacer(1, 8))
     story.append(_styled_table(headers, rows, widths, styles, right_cols=right_cols, header_bg=accent))
     return _render_pdf(story, pagesize, titulo, f"{sucursal_label} | {periodo_str}")
+
+
+# ==============================================================================
+# 7. FICHA TÉCNICA DE RECETA, ESCANDALLO Y PREPARACIÓN PASO A PASO
+# ==============================================================================
+def generar_pdf_receta_plato(receta_info: Dict[str, Any], ingredientes_df: pd.DataFrame) -> bytes:
+    """
+    Genera la Ficha Técnica Culinaria y Estándar HACCP de un plato:
+    datos de carta, escandallo por porción e indicaciones paso a paso de preparación.
+    """
+    pagesize = letter
+    content_width = pagesize[0] - 80
+    styles = _get_styles()
+
+    id_receta = int(receta_info["id_receta"])
+    nombre = str(receta_info["receta"])
+    categoria = str(receta_info["categoria"])
+    tiempo_min = int(receta_info.get("tiempo_preparacion_min", 18))
+    precio_venta = float(receta_info.get("precio_venta", 0))
+    activo_txt = "ACTIVA EN CARTA" if bool(receta_info.get("activo", True)) else "INACTIVA"
+    indicaciones_raw = str(receta_info.get("indicaciones_preparacion") or "").strip()
+
+    story: List[Any] = [
+        _header_banner(
+            titulo="FICHA TÉCNICA DE RECETA Y PREPARACIÓN ESTÁNDAR",
+            folio_label=f"RECETA #{id_receta}",
+            subtitulo=f"Plato: {nombre} | Categoría: {categoria}",
+            accent_color=C_PRIMARY,
+            content_width=content_width,
+            styles=styles,
+        ),
+        Spacer(1, 8),
+        Paragraph("1. Ficha General de Carta y Estándar Operativo", styles["h2"]),
+        _kv_grid(
+            [
+                [
+                    ("Nombre del Plato", nombre),
+                    ("Categoría", categoria),
+                    ("Estado", activo_txt),
+                ],
+                [
+                    ("Tiempo Estándar", f"{tiempo_min} minutos"),
+                    ("Precio Venta Carta", _fmt_clp(precio_venta)),
+                    ("Porción Base", "1 plato estandarizado"),
+                ],
+            ],
+            content_width,
+            styles,
+        ),
+        Spacer(1, 8),
+        Paragraph("2. Escandallo de Insumos y Gramajes por Porción", styles["h2"]),
+    ]
+
+    if ingredientes_df.empty:
+        story.append(
+            _observations_box(
+                "Escandallo",
+                "Esta receta no registra insumos asociados en el maestro de ingredientes.",
+                content_width,
+                styles,
+            )
+        )
+    else:
+        ing_rows = [
+            [
+                Paragraph(_esc(r["ingrediente"]), styles["cell_bold"]),
+                Paragraph(f"{_fmt_num(r['cantidad_kg'], 3)} {_esc(r['unidad_medida'])}", styles["cell_right"]),
+                Paragraph(_esc(r["unidad_medida"]), styles["cell"]),
+            ]
+            for _, r in ingredientes_df.iterrows()
+        ]
+        story.append(
+            _styled_table(
+                ["Materia Prima / Insumo Cárnico-Marino", "Cantidad Estándar", "Unidad"],
+                ing_rows,
+                [content_width * 0.58, content_width * 0.24, content_width * 0.18],
+                styles,
+                right_cols={1},
+                header_bg=C_TEAL,
+            )
+        )
+
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("3. Indicaciones de Preparación Paso a Paso (Estándar Cocina & HACCP)", styles["h2"]))
+
+    pasos = [ln.strip() for ln in indicaciones_raw.splitlines() if ln.strip()]
+    if not pasos:
+        story.append(
+            _observations_box(
+                "Preparación",
+                "Sin indicaciones de preparación registradas para este plato.",
+                content_width,
+                styles,
+            )
+        )
+    else:
+        paso_rows = []
+        for idx, linea in enumerate(pasos, start=1):
+            # Quitar prefijo numérico tipo '1. ' si ya viene incluido para mostrar columna Paso limpia
+            texto_limpio = linea
+            if len(linea) > 2 and linea[0].isdigit():
+                for sep in (". ", ") ", "- "):
+                    if sep in linea[:5]:
+                        texto_limpio = linea.split(sep, 1)[1].strip()
+                        break
+            paso_rows.append(
+                [
+                    Paragraph(f"<b>Paso {idx}</b>", styles["cell_bold"]),
+                    Paragraph(_esc(texto_limpio), styles["cell"]),
+                ]
+            )
+        story.append(
+            _styled_table(
+                ["Etapa", "Instrucción Estándar de Preparación y Control Sanitario"],
+                paso_rows,
+                [content_width * 0.14, content_width * 0.86],
+                styles,
+                header_bg=C_PRIMARY,
+            )
+        )
+
+    story.append(Spacer(1, 12))
+    story.append(
+        _signature_block(
+            [
+                ("Estándar Culinario", "Chef Ejecutivo", "chef"),
+                ("Aseguramiento Inocuidad", "Control Calidad HACCP", "admin"),
+            ],
+            content_width,
+            styles,
+        )
+    )
+    return _render_pdf(story, pagesize, f"Ficha Técnica — {nombre}", f"Receta #{id_receta} | {categoria}")
