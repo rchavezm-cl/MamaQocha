@@ -1,7 +1,9 @@
 import os
 import json
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -1744,6 +1746,19 @@ def _render_doh_interactivo(
     </html>
     """
     st.iframe(html_code, width="stretch", height=height + 24)
+
+
+def _render_pdf_preview(pdf_bytes: bytes, height: int = 580) -> None:
+    """Renderiza una vista previa PDF via media storage de Streamlit (evita bloqueo de data: URLs en Chrome)."""
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = Path(tmp.name)
+        st.iframe(tmp_path, width="stretch", height=height)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 # ==============================================================================
 # CONFIGURACIÓN GENERAL Y ESTILOS
@@ -5369,8 +5384,6 @@ elif nav_tab == "mermas":
         else:
             @st.dialog("📄 Vista Previa — Acta de Baja por Merma", width="large")
             def _mostrar_preview_acta_merma(id_mov: int) -> None:
-                import base64
-
                 st.markdown(f"#### 📄 Acta Oficial de Merma **N° {id_mov}**")
                 try:
                     data_pdf = _c_movimiento_pdf(int(id_mov))
@@ -5385,12 +5398,7 @@ elif nav_tab == "mermas":
                         key=f"dl_modal_acta_merma_{id_mov}",
                         on_click="ignore",
                     )
-                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-                    st.markdown(
-                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
-                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
-                        unsafe_allow_html=True,
-                    )
+                    _render_pdf_preview(pdf_bytes)
                 except Exception as ex_pdf_prev:
                     st.error(f"No se pudo generar la vista previa del Acta #{id_mov}: {ex_pdf_prev}")
 
@@ -5891,8 +5899,6 @@ elif nav_tab == "reportes":
 
             @st.dialog("📄 Vista Previa — Expediente por Lote SEREMI", width="large")
             def _mostrar_preview_expediente_lote_pdf(id_lote_pdf: int) -> None:
-                import base64
-
                 st.markdown(f"#### 📦 Expediente Completo SEREMI — **Lote #{id_lote_pdf}**")
                 try:
                     traz_modal = _c_trazabilidad_lote(int(id_lote_pdf))
@@ -5910,12 +5916,7 @@ elif nav_tab == "reportes":
                         key=f"dl_modal_rep_lote_{id_lote_pdf}",
                         on_click="ignore",
                     )
-                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-                    st.markdown(
-                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
-                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
-                        unsafe_allow_html=True,
-                    )
+                    _render_pdf_preview(pdf_bytes)
                 except Exception as ex_pdf_lote:
                     st.error(f"No se pudo generar la vista previa del Lote #{id_lote_pdf}: {ex_pdf_lote}")
 
@@ -6153,8 +6154,6 @@ elif nav_tab == "reportes":
 
         @st.dialog(f"📄 Vista Previa — {cfg['folio_pref']}", width="large")
         def _mostrar_preview_reporte_pdf(fid: int) -> None:
-            import base64
-
             st.markdown(f"#### 📄 {cfg['folio_pref']} **N° {fid}**")
             try:
                 data_pdf = cfg["detail_fn"](int(fid))
@@ -6169,12 +6168,7 @@ elif nav_tab == "reportes":
                     key=f"dl_modal_rep_{rep_tipo}_{fid}",
                     on_click="ignore",
                 )
-                b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-                st.markdown(
-                    f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
-                    'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
-                    unsafe_allow_html=True,
-                )
+                _render_pdf_preview(pdf_bytes)
             except Exception as ex_pdf_rep:
                 st.error(f"No se pudo generar la vista previa de {cfg['folio_pref']} #{fid}: {ex_pdf_rep}")
 
@@ -6633,8 +6627,6 @@ elif nav_tab == "maestros":
 
             @st.dialog("📄 Vista Previa — Ficha Técnica de Receta (PDF)", width="large")
             def _mostrar_preview_receta_pdf(rec_dict: dict, ings_df: pd.DataFrame) -> None:
-                import base64
-
                 st.markdown(f"#### 🍽️ {rec_dict['receta']} — **Receta #{int(rec_dict['id_receta'])}**")
                 try:
                     pdf_bytes = reportes_pdf.generar_pdf_receta_plato(rec_dict, ings_df)
@@ -6649,12 +6641,7 @@ elif nav_tab == "maestros":
                         key=f"dl_modal_receta_{int(rec_dict['id_receta'])}",
                         on_click="ignore",
                     )
-                    b64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-                    st.markdown(
-                        f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="580" '
-                        'style="border: 1px solid #e2e8f0; border-radius: 8px;"></iframe>',
-                        unsafe_allow_html=True,
-                    )
+                    _render_pdf_preview(pdf_bytes)
                 except Exception as ex_pdf_rec:
                     st.error(f"No se pudo generar la vista previa de la receta: {ex_pdf_rec}")
 
